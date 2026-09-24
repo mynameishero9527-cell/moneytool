@@ -4,7 +4,7 @@
 | --- | --- |
 | 对应需求 | `docs/prd-a-share-sector-capital.md` 0.6 |
 | 文档状态 | 方案稿，供评审，不含代码 |
-| 版本 | 0.2 |
+| 版本 | 0.3 |
 
 本文回答需求「怎么实现」。0.2 相对 0.1 的两个前提变化：数据源全部使用免费公开接口；程序是一个本地 Python 进程，单机运行，`python -m moneytool` 启动后浏览器打开即用。不重复需求里的业务规则，只引用章节号。
 
@@ -14,6 +14,7 @@
 | --- | --- |
 | 0.1 | 服务端方案：QMT 逐笔自算资金流、PostgreSQL + Redis + Prefect、Next.js |
 | 0.2 | 免费数据源 + 单进程本地运行：东方财富资金流为唯一资金口径、DuckDB 嵌入式存储、APScheduler 进程内调度、FastAPI 直接托管静态前端 |
+| 0.3 | 确认：前端用 Vite 构建、产物随 Python 包分发、`python -m moneytool` 直接启动；首次回补资金流 2 年；新增项目 skills 与 `AGENTS.md` |
 
 ---
 
@@ -166,7 +167,7 @@ python -m moneytool
 | 数据 | 范围 | 来源 | 说明 |
 | --- | --- | --- | --- |
 | 日线 + 复权 | 5 年，全 A | Baostock（批量友好） | 归因与低位企稳需要 |
-| 个股日频资金流 | 1 年，全 A | 东财 `stock_individual_fund_flow` | 需要逐只调用，约 5000 次，串行带间隔；可分多晚完成，UI 显示进度 |
+| 个股日频资金流 | 2 年，全 A | 东财 `stock_individual_fund_flow` | 接口按股票返回全部历史，逐只调用约 5000 次，串行带间隔；分多晚完成，UI 显示进度；先回补候选名单和自选股，再补全市场 |
 | 板块日频资金流 | 5 年 | 东财 `stock_sector_fund_flow_hist` | 板块数少，一晚可完成 |
 | 申万成分 | 当前 + 每日快照起点 | 申万 | 历史变更免费源不完整，从首次运行日开始积累；回看首次运行日之前的日期用当前成分并标「成分为近似」 |
 | 指数成分 | 当前，含纳入日期 | 中证 | 纳入日期可反推部分历史 |
@@ -232,8 +233,9 @@ DuckDB 是单写者。进程内用一个写连接归调度线程，Web 请求用
 
 ## 7. 前端
 
-- Vue 3 + ECharts + 一个轻量表格组件，Vite 打包成静态文件随 Python 包分发。用户不装 Node，只有开发者构建时需要。
-- 无构建的替代：若想彻底不引入前端工具链，可用 Vue 3 的 ESM 浏览器版 + ECharts 的单文件 JS 放在 `static/`，模板内联。功能上没有差别，只是开发体验差一些。方案默认 Vite 打包。
+- Vue 3 + TypeScript + ECharts + TanStack Table，Vite 构建。构建产物 `frontend/dist/` 拷入 Python 包的 `moneytool/static/`，随 wheel 分发；FastAPI 用 `StaticFiles` 托管，`/` 返回 `index.html`。用户只需 Python，不装 Node；开发者构建时需要 Node 20+。
+- 开发模式：`vite dev` 起在 5173，代理 `/api` 到 8000；生产模式只有一个 Python 进程。
+- 仓库里 `frontend/` 与 `moneytool/` 并列；`make build` 或 `python scripts/build_frontend.py` 一键构建并拷贝；CI 校验 `static/` 与 `frontend/` 源码一致。
 - 页面与需求 10 节一致：看板、多板块对比、板块详情、个股页、行动清单、自选、回看与事后统计、口径与说明，另加「数据状态」页显示回补进度、当日缺失、对账偏差。
 - 证据卡片组件统一渲染规则引擎的 JSON 证据，新增规则前端不用改。
 - 盘中：分段结束后前端轮询一次 `/api/status`，有新 segment 就刷新，不用 WebSocket。
@@ -331,8 +333,26 @@ APScheduler 进程内运行，任务依赖用显式串联而不是依赖图，�
 
 | 项 | 建议 | 备选 |
 | --- | --- | --- |
-| 前端是否引入 Vite 构建 | 是，打包后随包分发 | 无构建 ESM 版 |
 | 收盘确认的最晚时间 | 20:00 | 提前到 19:00 |
 | 通知渠道 | 桌面通知 + 企业微信 Webhook | 飞书 / 钉钉 |
-| 首次回补的资金流年限 | 1 年 | 2 年（回补时间翻倍） |
 | 数据目录 | `~/.moneytool/` | 程序所在目录 |
+
+已确认：前端用 Vite 构建、产物随包分发；首次回补资金流 2 年。
+
+---
+
+## 14. 项目 skills 与编码规范
+
+仓库根目录 `AGENTS.md` 放始终生效的规范；`.cursor/skills/` 放按需加载的工作流。开发前已就位：
+
+| skill | 用途 |
+| --- | --- |
+| `ui-design-system` | 本产品的视觉与交互规范：阶段配色、涨跌颜色、表格密度、证据卡片、盘中标记 |
+| `frontend-vue-echarts` | Vue 3 + TS + Vite + ECharts + TanStack 的组件、状态、图表、API 客户端约定 |
+| `backend-fastapi-duckdb` | 包结构、FastAPI 路由、DuckDB 连接、Polars 计算、配置与日志 |
+| `python-code-standards` | ruff / mypy / pytest 配置、类型、命名、错误处理、提交规范 |
+| `data-adapter-akshare` | 新增数据源适配器的步骤：契约、缓存、限速、doctor 检查 |
+| `rules-engine` | 新增或修改规则：纯函数、证据结构、参数 YAML、金样本 |
+| `duckdb-schema` | 表命名、快照表、迁移、读写连接分离 |
+| `acceptance-testing` | 需求 14 节 34 条验收到测试的映射与金样本维护 |
+| `release-packaging` | 构建前端、打包 wheel、版本号、`python -m moneytool` 启动检查 |
