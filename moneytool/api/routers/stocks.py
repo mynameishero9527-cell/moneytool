@@ -48,22 +48,44 @@ def detail(
         [day, day, meta.param_version, code],
     ).pl()
     roles = conn.execute(
-        "SELECT sector_id, role, tags, score, score_components, evidence FROM stock_role_confirmed "
-        "WHERE code = ? AND trade_date = ? AND param_version = ?",
+        "SELECT r.sector_id, sec.name AS sector_name, sec.level, r.role, r.tags, r.score, r.score_components, "
+        "r.evidence FROM stock_role_confirmed r LEFT JOIN sector sec USING (sector_id) "
+        "WHERE r.code = ? AND r.trade_date = ? AND r.param_version = ? ORDER BY sec.level DESC, r.sector_id",
         [code, day, meta.param_version],
     ).pl()
+    version = meta.param_version
     indices = conn.execute(
         "SELECT index_name, total, components, window_ok, degraded FROM index_daily "
-        "WHERE subject_type = 'stock' AND subject_id = ? AND trade_date = ? AND segment = 'close' ORDER BY index_name",
-        [code, day],
+        "WHERE subject_type = 'stock' AND subject_id = ? AND trade_date = ? AND segment = 'close' "
+        "AND param_version = ? ORDER BY index_name",
+        [code, day, version],
     ).pl()
     hold = conn.execute(
-        "SELECT eval, changed_from, evidence FROM hold_eval WHERE code = ? AND trade_date = ? ORDER BY param_version DESC LIMIT 1",
-        [code, day],
+        "SELECT eval, changed_from, evidence FROM hold_eval WHERE code = ? AND trade_date = ? AND param_version = ?",
+        [code, day, version],
     ).pl()
     hints = conn.execute(
-        "SELECT template_id, tier, text, links FROM hint WHERE subject_type = 'stock' AND subject_id = ? AND trade_date = ?",
-        [code, day],
+        "SELECT template_id, tier, text, links FROM hint WHERE subject_type = 'stock' AND subject_id = ? "
+        "AND trade_date = ? AND segment = 'close' AND param_version = ?",
+        [code, day, version],
+    ).pl()
+    profile = conn.execute(
+        "SELECT p.basis_sector, sec.name AS basis_sector_name, sec.level AS basis_level, p.identity, p.exclusions, "
+        "p.tradable, p.score, p.score_tier, p.score_components FROM stock_profile p "
+        "LEFT JOIN sector sec ON sec.sector_id = p.basis_sector "
+        "WHERE p.code = ? AND p.trade_date = ? AND p.segment = 'close' AND p.param_version = ?",
+        [code, day, version],
+    ).pl()
+    actions = conn.execute(
+        "SELECT a.sector_id, sec.name AS sector_name, a.list_type, a.point_type, a.basis_level, a.tags, "
+        "a.evidence, a.invalidation FROM action_list_confirmed a LEFT JOIN sector sec USING (sector_id) "
+        "WHERE a.code = ? AND a.trade_date = ? AND a.param_version = ? ORDER BY a.list_type, a.sector_id",
+        [code, day, version],
+    ).pl()
+    tracking = conn.execute(
+        "SELECT t.*, sec.name AS sector_name FROM tracking t LEFT JOIN sector sec USING (sector_id) "
+        "WHERE t.code = ? AND t.param_version = ? ORDER BY t.entered_date DESC LIMIT 20",
+        [code, version],
     ).pl()
     marks = conn.execute(
         "SELECT marked_at, mark, note FROM user_mark WHERE code = ? ORDER BY marked_at DESC LIMIT 20",
@@ -91,6 +113,11 @@ def detail(
             "indices": rows(indices, ("components",)),
             "hold_eval": rows(hold, ("evidence",))[0] if not hold.is_empty() else None,
             "hints": rows(hints, ("links",)),
+            "profile": rows(profile, ("identity", "exclusions", "score_components"))[0]
+            if not profile.is_empty()
+            else None,
+            "actions": rows(actions, ("tags", "evidence", "invalidation")),
+            "tracking": rows(tracking),
             "marks": rows(marks),
         },
     )

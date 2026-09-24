@@ -81,7 +81,13 @@ def test_every_response_has_meta(
         "/api/stocks/000001.SZ/history?days=20",
         "/api/stocks/000001.SZ/intraday",
         "/api/actions?list_type=buy",
+        "/api/actions?list_type=buy_invalid",
+        "/api/actions?list_type=hold_watch",
+        f"/api/actions?list_type=point&trade_date={last}&segment=1030_1130",
         "/api/tracking",
+        "/api/tracking?active_only=false",
+        "/api/stats",
+        "/api/briefs",
         "/api/marks",
         "/api/watchlist",
         f"/api/market/overview?trade_date={last}&segment=1030_1130",
@@ -145,7 +151,18 @@ def test_stock_detail_and_missing(client: TestClient) -> None:
     assert r["data"]["security"]["code"] == "000001.SZ"
     assert r["data"]["sectors"][0]["sector_id"] == "sw:801000"
     assert r["data"]["features"]["main_ratio"] is not None
-    assert r["data"]["roles"] == []
+    roles = r["data"]["roles"]
+    # 测试数据只有一级：行业依据板块回退一级，每只股票都有一行行业角色
+    assert [x["sector_id"] for x in roles] == ["sw:801000"]
+    assert roles[0]["role"] in ("core", "follow", "avoid", "other")
+    prof = r["data"]["profile"]
+    assert prof["basis_sector"] == "sw:801000"
+    assert prof["identity"]["indices"] == ["指数外"]
+    assert set(prof["exclusions"]) == {"control", "crash", "untradable"}
+    assert prof["score"] is None or 0 <= prof["score"] <= 100
+    names = {i["index_name"] for i in r["data"]["indices"]}
+    assert names == {"stock_risk", "retail_pressure"}
+    assert r["data"]["hints"][0]["text"].startswith("股000001 在一级0")
     assert client.get("/api/stocks/999999.SZ").status_code == 404
 
 

@@ -248,12 +248,22 @@ def detail(
     indices = conn.execute(
         "SELECT index_name, total, components, window_ok, degraded FROM index_daily "
         "WHERE subject_type = 'sector' AND subject_id = ? AND trade_date = ? AND segment = ? "
-        "ORDER BY index_name",
-        [sector_id, day, segment or "close"],
+        "AND param_version = ? ORDER BY index_name",
+        [sector_id, day, segment or "close", meta.param_version],
     ).pl()
     hints = conn.execute(
-        "SELECT template_id, tier, text, links FROM hint WHERE subject_type = 'sector' AND subject_id = ? AND trade_date = ?",
-        [sector_id, day],
+        "SELECT template_id, tier, text, links FROM hint WHERE subject_type = 'sector' AND subject_id = ? "
+        "AND trade_date = ? AND segment = ? AND param_version = ?",
+        [sector_id, day, segment or "close", meta.param_version],
+    ).pl()
+    roles = conn.execute(
+        f"""
+        SELECT r.code, s.name, r.role, r.tags, r.score FROM {"stock_role_confirmed" if segment in (None, "close") else "stock_role_intraday"} r
+        LEFT JOIN security s USING (code)
+        WHERE r.sector_id = ? AND r.trade_date = ? AND r.param_version = ?{"" if segment in (None, "close") else " AND r.segment = ?"}
+        ORDER BY CASE r.role WHEN 'core' THEN 0 WHEN 'follow' THEN 1 WHEN 'avoid' THEN 2 ELSE 3 END, r.score DESC NULLS LAST
+        """,
+        [sector_id, day, meta.param_version, *([] if segment in (None, "close") else [segment])],
     ).pl()
     return Envelope(
         meta=meta,
@@ -265,6 +275,7 @@ def detail(
             "members": member_rows,
             "indices": rows(indices, ("components",)),
             "hints": rows(hints, ("links",)),
+            "roles": rows(roles, ("tags",)),
         },
     )
 
