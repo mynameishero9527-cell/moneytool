@@ -7,14 +7,14 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from moneytool.params import Params, builtin_params_dir, load_params_file
+from moneytool.params import Params, builtin_params_dir, latest_params
 from moneytool.storage.conn import Database
 from moneytool.storage.migrate import migrate
 
 
 @pytest.fixture(scope="session")
 def params() -> Params:
-    return load_params_file(builtin_params_dir() / "v1.yaml")
+    return latest_params(builtin_params_dir())
 
 
 @pytest.fixture

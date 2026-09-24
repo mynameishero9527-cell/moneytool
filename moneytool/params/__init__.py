@@ -8,7 +8,7 @@ from importlib import resources
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class _Strict(BaseModel):
@@ -118,6 +118,10 @@ class RoleParams(_Strict):
     avoid_bottom: float
     bleed_outflow_days: int
     min_inflow_days_of_5: int
+    # v2 起显式给出；v1 取默认值（与需求 8.1 / 8.3 一致）
+    basis_levels: tuple[str, ...] = ("L2", "concept")
+    new_member_days: int = 5
+    diverge_ratio_side: float = 0.5
 
 
 class BuyParams(_Strict):
@@ -215,6 +219,26 @@ class IndexParams(_Strict):
     review_risk_min: int
     broken_risk_min: int
     retail_review_min: int
+    # v2 起显式给出；v1 取默认值（需求 7.7 / 8.11）
+    diverge_full_ratio: float = 0.02
+    hype_risk: dict[int, int] = Field(default_factory=lambda: {3: 20, 2: 12, 1: 6})
+    basis_risk_reduce: int = 4
+    overdraft_position_min: int = 16
+    liquidity_dry: float = 0.5
+    liquidity_hot: float = 1.5
+    micro_extra: int = 5
+    sector_risk_extra: int = 5
+    retail_peak_days: int = 10
+    retail_peak_drop: float = 0.1
+    retail_vwap_gap: float = 0.05
+    focus_risk_max: int = 60
+
+
+class LabelParams(_Strict):
+    """需求 9.7.1 事后统计。"""
+
+    horizons: tuple[int, ...] = (5, 10, 20)
+    min_samples: int = 20
 
 
 class Params(_Strict):
@@ -238,6 +262,7 @@ class Params(_Strict):
     tags: TagParams
     attribution: AttributionParams
     indices: IndexParams
+    labels: LabelParams = Field(default_factory=LabelParams)
 
 
 def builtin_params_dir() -> Path:

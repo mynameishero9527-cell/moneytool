@@ -27,7 +27,7 @@ def seeded(db: Database, params: Params) -> tuple[Database, list[dt.date]]:
             INSERT OR REPLACE INTO flow_snapshot
             SELECT 'stock', code, trade_date, '1030_1130', now(),
                    net_main * 0.5, net_super * 0.5, net_large * 0.5, net_medium * 0.5, net_small * 0.5,
-                   pct_chg, close
+                   pct_chg, close, NULL
             FROM flow_daily WHERE trade_date = ?
             """,
             [dates[-1]],

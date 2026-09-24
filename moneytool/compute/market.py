@@ -157,14 +157,15 @@ def rotation_pairs(
     """
     m = p.market
     out_stages = (Stage.EBB.value, Stage.DIVERGE.value)
-    frames = [l1_today] + ([l1_yesterday] if l1_yesterday is not None else [])
-    both = (
-        pl.concat([f for f in frames if not f.is_empty()], how="vertical_relaxed")
-        if frames
-        else l1_today
-    )
-    if both.is_empty() or "entered_today" not in both.columns:
+    cols = ("sector_id", "name", "stage", "sector_net_main", "entered_today")
+    frames = [
+        f.select(cols)
+        for f in (l1_today, l1_yesterday)
+        if f is not None and not f.is_empty() and all(c in f.columns for c in cols)
+    ]
+    if not frames:
         return []
+    both = pl.concat(frames, how="vertical_relaxed")
     leaving = both.filter(
         pl.col("entered_today")
         & pl.col("stage").is_in(out_stages)

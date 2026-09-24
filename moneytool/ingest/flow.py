@@ -63,6 +63,7 @@ def capture_segment(
             *[pl.col(c) for c in FLOW_COLS],
             "pct_chg",
             "close",
+            _amount_from_ratio(stock),
         )
         counts["stock"] = upsert(conn, "flow_snapshot", snap)
     except AdapterError as exc:
@@ -95,6 +96,18 @@ def capture_segment(
         )
         counts[kind] = upsert(conn, "flow_snapshot", snap)
     return counts
+
+
+def _amount_from_ratio(df: pl.DataFrame) -> pl.Expr:
+    """成交额 ≈ 主力净额 / 主力净占比；净占比为 0 或缺失时为 null（不填补）。"""
+    if "main_ratio" not in df.columns:
+        return pl.lit(None, dtype=pl.Float64).alias("amount")
+    return (
+        pl.when(pl.col("main_ratio").abs() > 1e-6)
+        .then((pl.col("net_main") / pl.col("main_ratio")).abs())
+        .otherwise(None)
+        .alias("amount")
+    )
 
 
 def _concept_name_map(conn: duckdb.DuckDBPyConnection) -> dict[str, str]:
@@ -142,12 +155,17 @@ def confirm_from_snapshot(
     if counts.get("stock", 0) == 0:
         return 0
     snap = conn.execute(
-        "SELECT subject_id AS code, trade_date, net_main, net_super, net_large, net_medium, net_small, close, pct_chg "
-        "FROM flow_snapshot WHERE trade_date = ? AND segment = ? AND subject_type = 'stock'",
+        "SELECT subject_id AS code, trade_date, net_main, net_super, net_large, net_medium, net_small, close, pct_chg, "
+        "amount AS snap_amount FROM flow_snapshot WHERE trade_date = ? AND segment = ? AND subject_type = 'stock'",
         [day, CLOSE_SEGMENT],
     ).pl()
     amount = conn.execute("SELECT code, amount FROM bar_daily WHERE trade_date = ?", [day]).pl()
-    df = snap.join(amount, on="code", how="left")
+    # 比例分母优先用日线成交额；日线未到时用快照反推值
+    df = (
+        snap.join(amount, on="code", how="left")
+        .with_columns(amount=pl.coalesce("amount", "snap_amount"))
+        .drop("snap_amount")
+    )
     ratios = [
         pl.when(pl.col("amount") > 0)
         .then(pl.col(c) / pl.col("amount"))

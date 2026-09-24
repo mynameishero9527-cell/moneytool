@@ -14,7 +14,7 @@ import polars as pl
 from moneytool.adapters.base import AdapterError
 from moneytool.app import AppContext, now_sh, today_sh
 from moneytool.compute.pipeline import PipelineResult, run
-from moneytool.ingest.bars import backfill_bars, daily_bars_from_snapshot
+from moneytool.ingest.bars import backfill_bars, daily_bars_from_snapshot, update_float_mv
 from moneytool.ingest.flow import (
     CLOSE_SEGMENT,
     backfill_flow,
@@ -190,7 +190,8 @@ class JobRunner:
                 )
                 if not deadline and not force:
                     return None
-            # 2) 当日正式资金流 = 收盘后最后一次「今日」累计
+            # 2) 当日正式资金流 = 收盘后最后一次「今日」累计；同时拉全 A 快照写流通市值与换手
+            spot = self._spot(conn, day)
             n = confirm_from_snapshot(conn, ad, day, now_sh())
             if n == 0:
                 record_quality(
@@ -203,7 +204,9 @@ class JobRunner:
                     reason="收盘累计拉取失败",
                 )
             if not bars_ready:
-                self._bars_from_snapshot(conn, day)
+                self._bars_from_snapshot(conn, day, spot)
+            if spot is not None:
+                update_float_mv(conn, spot, day)
             # 3) 计算与存档
             res = run(conn, self.ctx.params_for(day), day)
             setting_set(conn, f"confirmed:{day.isoformat()}", "1")
@@ -240,17 +243,33 @@ class JobRunner:
         )
         return True
 
-    def _bars_from_snapshot(self, conn: duckdb.DuckDBPyConnection, day: dt.date) -> None:
+    def _spot(self, conn: duckdb.DuckDBPyConnection, day: dt.date) -> pl.DataFrame | None:
+        try:
+            return self.ctx.adapters.eastmoney.spot(day)
+        except AdapterError as exc:
+            record_quality(
+                conn,
+                source="eastmoney",
+                endpoint="spot",
+                trade_date=day,
+                status=QualityStatus.MISSING,
+                reason=str(exc)[:300],
+            )
+            return None
+
+    def _bars_from_snapshot(
+        self, conn: duckdb.DuckDBPyConnection, day: dt.date, spot: pl.DataFrame | None
+    ) -> None:
+        """日线未到：优先用全 A 快照（成交额、换手、流通市值齐全），否则用资金流快照反推成交额。"""
         snap = conn.execute(
-            "SELECT s.subject_id AS code, sec.name, s.close, s.pct_chg, "
-            "s.net_main / NULLIF(f.main_ratio, 0) AS amount, NULL::DOUBLE AS turnover, b.float_mv "
+            "SELECT s.subject_id AS code, sec.name, s.close, s.pct_chg, s.amount, "
+            "NULL::DOUBLE AS turnover, NULL::DOUBLE AS float_mv "
             "FROM flow_snapshot s LEFT JOIN security sec ON sec.code = s.subject_id "
-            "LEFT JOIN flow_daily f ON f.code = s.subject_id AND f.trade_date = s.trade_date "
-            "LEFT JOIN (SELECT code, float_mv FROM bar_daily WHERE trade_date = "
-            "(SELECT max(trade_date) FROM bar_daily WHERE trade_date < ?)) b ON b.code = s.subject_id "
             "WHERE s.trade_date = ? AND s.segment = ? AND s.subject_type = 'stock'",
-            [day, day, CLOSE_SEGMENT],
+            [day, CLOSE_SEGMENT],
         ).pl()
+        if spot is not None and not spot.is_empty():
+            snap = spot.select("code", "name", "close", "pct_chg", "amount", "turnover", "float_mv")
         if snap.is_empty():
             return
         prev_close = conn.execute(

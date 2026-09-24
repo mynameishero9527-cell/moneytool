@@ -46,6 +46,7 @@ EXPECTED_TABLES = {
     "backfill_progress",
     "job_run",
     "schema_version",
+    "stock_profile",
 }
 
 
@@ -56,7 +57,7 @@ def test_all_tables_created(db: Database) -> None:
 
 def test_migrate_is_idempotent(db: Database) -> None:
     assert migrate(db.rw) == []
-    assert applied_versions(db.rw) == {1}
+    assert applied_versions(db.rw) == {1, 2}
 
 
 def test_intraday_tables_have_segment(db: Database) -> None:

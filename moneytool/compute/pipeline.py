@@ -90,21 +90,25 @@ def load_intraday_today(
             FROM flow_intraday WHERE trade_date = ? GROUP BY code
         ),
         snap AS (
-            SELECT subject_id AS code, close, pct_chg, net_main AS cum_main
+            SELECT subject_id AS code, close, pct_chg, amount
             FROM flow_snapshot WHERE trade_date = ? AND segment = ? AND subject_type = 'stock'
         ),
         prev AS (
-            SELECT code, close AS pre_close, adj_factor, limit_up, float_mv
+            SELECT code, close AS prev_close, pre_close AS prev_pre_close, limit_up AS prev_limit_up,
+                   adj_factor, float_mv
             FROM bar_daily WHERE trade_date = (SELECT max(trade_date) FROM bar_daily WHERE trade_date < ?)
         )
-        SELECT s.code, CAST(? AS DATE) AS trade_date,
+        SELECT snap.code, CAST(? AS DATE) AS trade_date,
                seg.net_main, seg.net_super, seg.net_large, seg.net_medium, seg.net_small,
                NULL::DOUBLE AS open, NULL::DOUBLE AS high, NULL::DOUBLE AS low, snap.close,
-               prev.pre_close, NULL::DOUBLE AS amount, NULL::DOUBLE AS turnover, snap.pct_chg,
-               prev.adj_factor, prev.pre_close * (prev.limit_up / NULLIF(prev.pre_close, 0)) AS limit_up, prev.float_mv
-        FROM snap s
+               prev.prev_close AS pre_close, snap.amount,
+               snap.amount / NULLIF(prev.float_mv / NULLIF(prev.prev_close, 0) * snap.close, 0) AS turnover,
+               snap.pct_chg, prev.adj_factor,
+               -- 今日涨停价 ≈ 昨收 × (昨日涨停价 / 前收)，沿用昨日的涨跌停幅度
+               round(prev.prev_close * prev.prev_limit_up / NULLIF(prev.prev_pre_close, 0), 2) AS limit_up,
+               prev.float_mv
+        FROM snap
         JOIN seg USING (code)
-        JOIN snap USING (code)
         LEFT JOIN prev USING (code)
         """,
         [day, day, segment, day, day],
@@ -160,6 +164,52 @@ def load_prev_market(
         [day, version],
     ).pl()
     return None if df.is_empty() else df.row(0, named=True)
+
+
+def load_top3_history(
+    conn: duckdb.DuckDBPyConnection, day: dt.date, version: str, today_share: float | None
+) -> pl.DataFrame:
+    """历史 L1 前三份额取自 market_daily.evidence（每日收盘存档时写入）；缺失保持 null。"""
+    hist = conn.execute(
+        "SELECT trade_date, TRY_CAST(json_extract(evidence, '$.top3_share') AS DOUBLE) AS top3_share "
+        "FROM market_daily WHERE segment = 'close' AND param_version = ? AND trade_date < ?",
+        [version, day],
+    ).pl()
+    today = pl.DataFrame(
+        {"trade_date": [day], "top3_share": [today_share]},
+        schema={"trade_date": pl.Date, "top3_share": pl.Float64},
+    )
+    if hist.is_empty():
+        return today
+    return pl.concat([hist.cast({"trade_date": pl.Date, "top3_share": pl.Float64}), today])
+
+
+def load_prev_l1(
+    conn: duckdb.DuckDBPyConnection, day: dt.date, version: str, l1_ids: set[str]
+) -> pl.DataFrame | None:
+    """上一确认日的 L1 阶段与净额，供相邻 2 日轮动判定。"""
+    if not l1_ids:
+        return None
+    df = conn.execute(
+        """
+        WITH d AS (
+            SELECT max(trade_date) AS td FROM sector_stage_confirmed
+            WHERE trade_date < ? AND param_version = ?
+        )
+        SELECT s.sector_id, sec.name, s.stage, s.days_in_stage = 1 AS entered_today,
+               TRY_CAST(json_extract(f.features, '$.sector_net_main') AS DOUBLE) AS sector_net_main
+        FROM sector_stage_confirmed s
+        JOIN d ON s.trade_date = d.td
+        LEFT JOIN sector sec USING (sector_id)
+        LEFT JOIN feature_daily f
+          ON f.subject_type = 'sector' AND f.subject_id = s.sector_id AND f.trade_date = s.trade_date
+         AND f.segment = 'close' AND f.param_version = s.param_version
+        WHERE s.param_version = ?
+        """,
+        [day, version, version],
+    ).pl()
+    df = df.filter(pl.col("sector_id").is_in(list(l1_ids)))
+    return None if df.is_empty() else df
 
 
 # ---------- 主流程 ----------
@@ -298,25 +348,8 @@ def run(
         how="vertical_relaxed",
     )
     mainline, regime, top3 = mainline_and_regime(l1_today, l1_history, p)
-    rotation = rotation_pairs(l1_today, None, p)
-
-    top3_hist = conn.execute(
-        "SELECT trade_date, mainline FROM market_daily WHERE segment = 'close' AND param_version = ? AND trade_date < ?",
-        [p.version, day],
-    ).pl()
-    top3_frame = pl.DataFrame(
-        {"trade_date": [day], "top3_share": [top3]},
-        schema={"trade_date": pl.Date, "top3_share": pl.Float64},
-    )
-    if not top3_hist.is_empty():
-        # 历史 top3 份额未单列存储时用 null（分位窗口不足会标历史不足）
-        top3_frame = pl.concat(
-            [
-                top3_hist.select("trade_date", pl.lit(None, dtype=pl.Float64).alias("top3_share")),
-                top3_frame,
-            ]
-        )
-    pressure = market_pressure(market, top3_frame, p)
+    rotation = rotation_pairs(l1_today, load_prev_l1(conn, day, p.version, l1_ids), p)
+    pressure = market_pressure(market, load_top3_history(conn, day, p.version, top3), p)
     today_market = pressure.filter(pl.col("trade_date") == day)
     market_row: dict[str, Any] = (
         today_market.row(0, named=True) if not today_market.is_empty() else {}
