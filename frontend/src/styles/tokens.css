@@ -1,0 +1,39 @@
+:root {
+  /* 涨跌：A 股惯例红涨绿跌 */
+  --c-up: #d9363e;
+  --c-down: #1f9d55;
+  --c-neutral: #6b7280;
+
+  --c-text: #111827;
+  --c-text-2: #6b7280;
+  --c-border: #e5e7eb;
+  --c-bg: #ffffff;
+  --c-card: #f9fafb;
+
+  --c-intraday: #f59e0b;
+  --c-missing: #9ca3af;
+
+  /* 六阶段 */
+  --stage-freeze: #93c5fd;
+  --stage-start: #fcd34d;
+  --stage-spread: #fb923c;
+  --stage-climax: #dc2626;
+  --stage-diverge: #a855f7;
+  --stage-ebb: #64748b;
+
+  /* 五档 */
+  --tier-1: #93c5fd;
+  --tier-2: #a5b4fc;
+  --tier-3: #d4d4d8;
+  --tier-4: #fdba74;
+  --tier-5: #f87171;
+
+  --gate-bg: #fef3c7;
+  --gate-fg: #92400e;
+
+  --fs-body: 13px;
+  --fs-table: 12px;
+  --fs-title: 15px;
+  --fs-page: 18px;
+  --row-h: 32px;
+}
