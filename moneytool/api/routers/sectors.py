@@ -187,7 +187,9 @@ def detail(
         conn, day, segment, meta.param_version, where=" AND s.sector_id = ?", args=[sector_id]
     )
     stage_row = items[0] if items else None
-    features = stage_row.pop("features", None) if stage_row else None
+    features = stage_row.get("features") if stage_row else None
+    if items:
+        _trim_features(items)
 
     children = conn.execute(
         """

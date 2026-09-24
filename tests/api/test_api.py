@@ -133,6 +133,7 @@ def test_sector_detail(client: TestClient) -> None:
     data = r["data"]
     assert data["sector"]["level"] == "L1"
     assert data["stage"]["stage"] in ("freeze", "start", "spread", "climax", "diverge", "ebb")
+    assert "market_share" in data["stage"]["metrics"]
     assert "sector_net_main" in data["features"]
     assert len(data["members"]) == 10
     assert data["members"][0]["metrics"].keys() >= {"ret_5d", "is_limit_up"}
