@@ -184,6 +184,12 @@ indices:            # 需求 7.6 / 7.7 / 8.11
   retail_vwap_gap: 0.05            # 低于 20 日成交额加权均价 5% 取满
   focus_risk_max: 60               # 板块提示「可关注」要求风险 < 60
 
-labels:             # 需求 9.7.1
-  horizons: [5, 10, 20]
-  min_samples: 20
+labels:             # 需求 9.7.1：各名单的观察窗口（交易日）；样本不足时只显示样本数
+  horizons:
+    buy: [3, 5, 10]
+    lowbase: [10, 20, 30]
+    point: [5, 10]
+    sell: [5]
+    hold: [5, 10]
+    bought: [5, 10]
+  min_samples: 30

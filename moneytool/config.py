@@ -26,6 +26,7 @@ class DataConfig(BaseModel):
     raw_retention_days: int = 90
     log_retention_days: int = 30
     backup_keep: int = 5
+    intraday_retention_days: int = 30  # 盘中分段中间结果保留天数（收盘确认结果永久保留）
 
 
 class SourceRateLimit(BaseModel):

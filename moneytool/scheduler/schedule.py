@@ -31,6 +31,12 @@ def build_scheduler(runner: JobRunner) -> BackgroundScheduler:
         misfire_grace_time=3600,
     )
     sch.add_job(
+        runner.job_premarket_brief,
+        CronTrigger(day_of_week=weekdays, hour=8, minute=30, timezone=TZ),
+        id="premarket_brief",
+        misfire_grace_time=3600,
+    )
+    sch.add_job(
         lambda: runner.job_segment(Segment.AUCTION.value),
         CronTrigger(
             day_of_week=weekdays, hour=AUCTION_TIME[0], minute=AUCTION_TIME[1], timezone=TZ

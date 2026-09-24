@@ -48,7 +48,7 @@ def stats(
         meta=Meta(trade_date=None, status=DataStatus.CONFIRMED, param_version=version),
         data={
             "min_samples": p.labels.min_samples,
-            "horizons": list(p.labels.horizons),
+            "horizons": {k: list(v) for k, v in p.labels.horizons.items()},
             "groups": data,
         },
     )

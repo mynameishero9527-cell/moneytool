@@ -176,8 +176,12 @@ def watchlist(
     day = resolve_trade_date(conn, trade_date)
     df = conn.execute(
         """
-        SELECT w.code, w.group_id, w.added_at, s.name, f.net_main, f.main_ratio, f.pct_chg, f.close, h.eval AS hold_eval
+        SELECT w.code, w.group_id, w.added_at, coalesce(s.name, sec.name) AS name,
+               CASE WHEN sec.sector_id IS NULL THEN 'stock' ELSE 'sector' END AS kind,
+               f.net_main, f.main_ratio, f.pct_chg, f.close, h.eval AS hold_eval,
+               json_extract_string(h.evidence, '$.text') AS hold_text
         FROM watchlist w LEFT JOIN security s ON s.code = w.code
+        LEFT JOIN sector sec ON sec.sector_id = w.code
         LEFT JOIN flow_daily f ON f.code = w.code AND f.trade_date = ?
         LEFT JOIN hold_eval h ON h.code = w.code AND h.trade_date = ?
         ORDER BY w.group_id, w.added_at
@@ -190,9 +194,12 @@ def watchlist(
 @router.post("/watchlist/{code}", response_model=Envelope, status_code=201)
 def add_watch(code: str, request: Request, group_id: str = "default") -> Envelope:
     with write_conn(request) as conn:
-        exists = conn.execute("SELECT 1 FROM security WHERE code = ?", [code]).fetchone()
+        exists = conn.execute(
+            "SELECT 1 FROM security WHERE code = ? UNION ALL SELECT 1 FROM sector WHERE sector_id = ?",
+            [code, code],
+        ).fetchone()
         if exists is None:
-            raise HTTPException(status_code=404, detail="证券不存在")
+            raise HTTPException(status_code=404, detail="证券或板块不存在")
         conn.execute(
             "INSERT OR REPLACE INTO watchlist (code, group_id) VALUES (?, ?)", [code, group_id]
         )

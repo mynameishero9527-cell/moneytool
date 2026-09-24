@@ -61,6 +61,7 @@ def test_schedule_has_all_slots(ctx: AppContext) -> None:
     ids = {j.id for j in sch.get_jobs()}
     assert ids == {
         "reference_sync",
+        "premarket_brief",
         "segment_auction",
         "segment_0930_1030",
         "segment_1030_1130",

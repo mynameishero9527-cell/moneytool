@@ -237,8 +237,17 @@ class IndexParams(_Strict):
 class LabelParams(_Strict):
     """需求 9.7.1 事后统计。"""
 
-    horizons: tuple[int, ...] = (5, 10, 20)
-    min_samples: int = 20
+    horizons: dict[str, tuple[int, ...]] = Field(
+        default_factory=lambda: {
+            "buy": (3, 5, 10),
+            "lowbase": (10, 20, 30),
+            "point": (5, 10),
+            "sell": (5,),
+            "hold": (5, 10),
+            "bought": (5, 10),
+        }
+    )
+    min_samples: int = 30
 
 
 class Params(_Strict):

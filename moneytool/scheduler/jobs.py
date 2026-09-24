@@ -13,6 +13,7 @@ import polars as pl
 
 from moneytool.adapters.base import AdapterError
 from moneytool.app import AppContext, now_sh, today_sh
+from moneytool.compute.labels import compute_labels
 from moneytool.compute.pipeline import PipelineResult, run
 from moneytool.ingest.bars import backfill_bars, daily_bars_from_snapshot, update_float_mv
 from moneytool.ingest.flow import (
@@ -32,6 +33,9 @@ from moneytool.ingest.reference import (
 )
 from moneytool.lock import write_lock
 from moneytool.logging import get_logger
+from moneytool.notify import dispatch, pending_quiet, push
+from moneytool.report import close_brief, premarket_brief, save_brief
+from moneytool.storage.maintenance import backup_database, prune_intraday
 from moneytool.storage.repo import (
     is_trading_day,
     latest_confirmed_date,
@@ -166,7 +170,10 @@ class JobRunner:
             if counts.get("stock", 0) == 0:
                 return None
             rebuild_intraday(conn, day)
-            return run(conn, self.ctx.params_for(day), day, segment=segment)
+            p = self.ctx.params_for(day)
+            res = run(conn, p, day, segment=segment)
+            self._alerts(conn, day, segment, p.version)
+            return res
 
         out = self.run_job("segment", work, segment=segment)
         return out if isinstance(out, PipelineResult) else None
@@ -207,9 +214,14 @@ class JobRunner:
                 self._bars_from_snapshot(conn, day, spot)
             if spot is not None:
                 update_float_mv(conn, spot, day)
-            # 3) 计算与存档
-            res = run(conn, self.ctx.params_for(day), day)
+            # 3) 计算与存档 → 提醒 → 收盘简报
+            p = self.ctx.params_for(day)
+            res = run(conn, p, day)
             setting_set(conn, f"confirmed:{day.isoformat()}", "1")
+            self._alerts(conn, day, None, p.version)
+            save_brief(
+                conn, day, "close", close_brief(conn, day, p.version), self.ctx.settings.briefs_dir
+            )
             return res
 
         out = self.run_job("close_confirm", work)
@@ -311,11 +323,56 @@ class JobRunner:
                         status=QualityStatus.MISSING,
                         reason=str(exc),
                     )
-            removed = ad.eastmoney.ctx.cache.prune(self.ctx.settings.data.raw_retention_days)
-            log.info("raw_pruned", files=removed)
+            confirmed = latest_confirmed_date(conn)
+            if confirmed is not None:
+                labels = compute_labels(conn, confirmed, self.ctx.params_for(confirmed))
+                log.info("labels_done", rows=labels)
+            s = self.ctx.settings
+            removed = ad.eastmoney.ctx.cache.prune(s.data.raw_retention_days)
+            pruned = prune_intraday(conn, day, s.data.intraday_retention_days)
+            backup = backup_database(conn, s.db_path, s.backups_dir, day, s.data.backup_keep)
+            log.info("nightly_maintenance", raw_files=removed, intraday=pruned, backup=str(backup))
             return n
 
         self.run_job("nightly", work)
+
+    # ---- 08:30 盘前简报 ----
+
+    def job_premarket_brief(self) -> None:
+        day = today_sh()
+
+        def work(conn: duckdb.DuckDBPyConnection) -> int:
+            if not is_trading_day(conn, day):
+                return 0
+            p = self.ctx.params_for(day)
+            since = previous_trading_day(conn, day) or day
+            quiet = pending_quiet(conn, since)
+            md = premarket_brief(conn, day, p.version, quiet)
+            save_brief(conn, day, "premarket", md, self.ctx.settings.briefs_dir)
+            conn.execute(
+                "UPDATE alert_log SET pushed_at = now() WHERE pushed_at IS NULL AND trade_date >= ?",
+                [since],
+            )
+            push(self.ctx.settings.notify, [md.splitlines()[0], *quiet[:10]])
+            return len(quiet)
+
+        self.run_job("premarket_brief", work)
+
+    def _alerts(
+        self, conn: duckdb.DuckDBPyConnection, day: dt.date, segment: str | None, version: str
+    ) -> None:
+        try:
+            dispatch(
+                conn,
+                day,
+                segment,
+                version,
+                self.ctx.settings.notify,
+                now_sh(),
+                is_trading_day(conn, day),
+            )
+        except Exception as exc:
+            log.error("alerts_failed", error=str(exc))
 
     @staticmethod
     def _reconcile_sample_codes(
