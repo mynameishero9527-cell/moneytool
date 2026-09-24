@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { useQuery } from "@tanstack/vue-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 import { computed, ref } from "vue";
 import { api } from "../api/client";
-import type { SectorMember } from "../api/types";
+import type { Evidence, Role, SectorMember } from "../api/types";
 import { sectorHistoryOption } from "../charts/options";
-import { STAGE_LABEL, pct, yi, num, signClass } from "../charts/format";
+import { ROLE_LABEL, STAGE_LABEL, pct, yi, num, signClass } from "../charts/format";
 import DataTable, { type Column } from "../components/DataTable.vue";
 import EmptyState from "../components/EmptyState.vue";
 import EvidenceCard from "../components/EvidenceCard.vue";
+import HintBlock from "../components/HintBlock.vue";
+import IndexGauge from "../components/IndexGauge.vue";
 import MetaBadge from "../components/MetaBadge.vue";
 import StageBadge from "../components/StageBadge.vue";
 import { useEcharts } from "../composables/useEcharts";
@@ -52,6 +54,32 @@ const featureRows = computed(() => {
     .map(([k, v]) => [k, v as number] as const);
 });
 const showFeatures = ref(false);
+
+const qc = useQueryClient();
+const watchlist = useQuery({ queryKey: ["watchlist", null], queryFn: () => api.watchlist(null) });
+const inWatch = computed(() => (watchlist.data.value?.data ?? []).some((w) => w.code === props.id));
+const toggleWatch = useMutation({
+  mutationFn: () => (inWatch.value ? api.removeWatch(props.id) : api.addWatch(props.id)),
+  onSuccess: () => qc.invalidateQueries({ queryKey: ["watchlist"] }),
+});
+
+interface Attribution {
+  summary: string;
+  hype?: { score: number; items: Evidence[] };
+  seasonal?: { score: number | null; note: string };
+  external?: { score: number | null; note: string };
+}
+const ROLE_ORDER: Role[] = ["core", "follow", "avoid"];
+const roleGroups = computed(() =>
+  ROLE_ORDER.map((role) => ({ role, rows: (d.value?.roles ?? []).filter((r) => r.role === role) })).filter(
+    (g) => g.rows.length,
+  ),
+);
+const attribution = computed(() => {
+  const a = d.value?.stage?.attribution;
+  return a && typeof a === "object" && "summary" in a ? (a as Attribution) : null;
+});
+const showAttr = ref(false);
 </script>
 
 <template>
@@ -64,6 +92,8 @@ const showFeatures = ref(false);
         <span class="tag">{{ d.sector.level }}</span>
         <router-link v-if="d.sector.parent_id" class="muted" :to="{ name: 'sector', params: { id: d.sector.parent_id }, query: $route.query }">↑ 所属一级</router-link>
         <MetaBadge :meta="detail.data.value?.meta" />
+        <span class="spacer" />
+        <button class="btn" :disabled="toggleWatch.isPending.value" @click="toggleWatch.mutate()">{{ inWatch ? "移出自选" : "加入自选" }}</button>
       </h1>
 
       <div v-if="d.stage" class="grid grid-4">
@@ -92,9 +122,16 @@ const showFeatures = ref(false);
       </div>
       <EmptyState v-else :reason="detail.data.value?.meta.reason ?? '该日无该板块阶段结果'" />
 
-      <div v-if="d.hints.length" class="card" style="margin-top: 12px">
-        <div v-for="h in d.hints" :key="h.template_id" class="hint">{{ h.text }}</div>
+      <HintBlock :hints="d.hints" style="margin-top: 12px" />
+
+      <div v-if="attribution" class="card attribution" style="margin-top: 12px">
+        <b>资金归因</b>
+        <span>{{ attribution.summary }}</span>
+        <span v-if="attribution.hype" class="muted">概念炒作倾向 {{ attribution.hype.score }}/3</span>
+        <span class="muted">季节性：{{ attribution.seasonal?.note ?? "—" }} · 外部：{{ attribution.external?.note ?? "—" }}</span>
+        <a v-if="attribution.hype" href="#" class="muted" @click.prevent="showAttr = !showAttr">{{ showAttr ? "收起" : "依据" }}</a>
       </div>
+      <EvidenceCard v-if="showAttr && attribution?.hype" :evidence="{ hype: attribution.hype.items }" />
 
       <div class="section-title">近 120 日：主力净流入、5 日均值、市场份额；底色为阶段</div>
       <div ref="chartEl" class="chart card" />
@@ -131,12 +168,29 @@ const showFeatures = ref(false);
         </div>
         <div v-if="d.indices.length">
           <div class="section-title">指数（描述性，不影响判定）</div>
-          <div v-for="ix in d.indices" :key="ix.index_name" class="card" style="margin-bottom: 6px">
-            <b>{{ ix.index_name }}</b>
-            <span class="num" style="margin-left: 8px">{{ ix.window_ok && !ix.degraded ? ix.total : ix.degraded ? "降级" : "历史不足" }}</span>
-          </div>
+          <IndexGauge v-for="ix in d.indices" :key="ix.index_name" :index="ix" style="margin-bottom: 6px" />
         </div>
       </div>
+
+      <template v-if="roleGroups.length">
+        <div class="section-title">成分角色</div>
+        <div class="grid grid-3">
+          <div v-for="g in roleGroups" :key="g.role" class="card">
+            <div class="role-head"><span class="tag" :class="'role-' + g.role">{{ ROLE_LABEL[g.role] }}</span><span class="muted">{{ g.rows.length }} 只</span></div>
+            <div
+              v-for="r in g.rows.slice(0, 12)"
+              :key="r.code"
+              class="role-row clickable"
+              @click="$router.push({ name: 'stock', params: { code: r.code }, query: $route.query })"
+            >
+              <span>{{ r.name ?? r.code }}<span class="code">{{ r.code }}</span></span>
+              <span class="tags"><span v-for="t in r.tags ?? []" :key="t" class="tag">{{ t }}</span></span>
+              <span class="num muted">{{ r.score ?? "" }}</span>
+            </div>
+            <div v-if="g.rows.length > 12" class="muted small">另 {{ g.rows.length - 12 }} 只见下方成分表</div>
+          </div>
+        </div>
+      </template>
 
       <div class="section-title">成分个股（{{ d.members.length }}）</div>
       <DataTable
@@ -171,7 +225,49 @@ const showFeatures = ref(false);
   height: 320px;
   padding: 0;
 }
-.hint {
+.spacer {
+  flex: 1;
+}
+.btn {
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  border: 1px solid var(--c-border);
+  background: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.attribution {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.role-head {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.role-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
   padding: 2px 0;
+}
+.role-row .tags {
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.small {
+  font-size: 12px;
+}
+.role-core {
+  background: #dbeafe;
+  color: #1e3a8a;
+}
+.role-avoid {
+  background: #e5e7eb;
+  color: #374151;
 }
 </style>

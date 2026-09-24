@@ -154,7 +154,10 @@ export interface SectorMember {
 export interface IndexRow {
   index_name: string;
   total: number | null;
-  components: Record<string, number | null> | null;
+  components: {
+    items: { key: string; name: string; value: number | null; max: number; note: string }[];
+    tier: string | null;
+  } | null;
   window_ok: boolean;
   degraded: boolean;
 }
@@ -163,7 +166,24 @@ export interface HintRow {
   template_id: string;
   tier: string;
   text: string;
-  links: unknown;
+  links: HintSentence[] | null;
+}
+
+export type Role = "core" | "follow" | "avoid" | "other";
+export type HoldEval = "intact" | "review" | "broken";
+export type ListType = "buy" | "buy_invalid" | "sell" | "hold_watch" | "point" | "lowbase";
+
+export interface HintSentence {
+  text: string;
+  links: string[];
+}
+
+export interface SectorRoleRow {
+  code: string;
+  name: string | null;
+  role: Role;
+  tags: string[] | null;
+  score: number | null;
 }
 
 export interface SectorDetail {
@@ -176,6 +196,146 @@ export interface SectorDetail {
   members: SectorMember[];
   indices: IndexRow[];
   hints: HintRow[];
+  roles: SectorRoleRow[];
+}
+
+export interface ActionRow {
+  code: string;
+  name: string | null;
+  sector_id: string;
+  sector_name: string | null;
+  sector_level: SectorLevel | null;
+  sector_stage: Stage | null;
+  sector_half: string | null;
+  days_in_stage: number | null;
+  trade_date: string;
+  list_type: ListType;
+  basis_level: string;
+  point_type: string | null;
+  tags: string[] | null;
+  evidence: EvidenceMap | null;
+  invalidation: unknown;
+  score: number | null;
+  score_tier: string | null;
+  risk_total: number | null;
+  retention_5d: number | null;
+  close: number | null;
+  pct_chg: number | null;
+  net_main: number | null;
+  main_ratio: number | null;
+}
+
+export interface TrackingRow {
+  list_type: string;
+  code: string;
+  name?: string | null;
+  sector_id: string;
+  sector_name: string | null;
+  entered_date: string;
+  entered_price: number | null;
+  entered_stage: Stage | null;
+  exited_date: string | null;
+  exit_reason: string | null;
+  last_close?: number | null;
+  ret_since?: number | null;
+  excess_vs_eqw?: number | null;
+  excess_vs_sector?: number | null;
+  current_role?: Role | null;
+  current_actions?: string[] | null;
+}
+
+export interface WatchRow {
+  code: string;
+  group_id: string;
+  added_at: string;
+  name: string | null;
+  kind: "stock" | "sector";
+  net_main: number | null;
+  main_ratio: number | null;
+  pct_chg: number | null;
+  close: number | null;
+  hold_eval: HoldEval | null;
+  hold_text: string | null;
+}
+
+export interface StatGroup {
+  list_type: string;
+  point_type: string;
+  horizon: number;
+  risk_gate: boolean | null;
+  n: number;
+  mean_ret: number | null;
+  median_ret: number | null;
+  win_rate: number | null;
+  mean_excess_sector: number | null;
+  mean_excess_eqw: number | null;
+  mean_max_drawdown: number | null;
+  enough: boolean;
+}
+
+export interface StatsData {
+  min_samples: number;
+  horizons: Record<string, number[]>;
+  groups: StatGroup[];
+}
+
+export interface BriefRow {
+  trade_date: string;
+  kind: "close" | "premarket";
+  markdown?: string;
+  generated_at: string;
+}
+
+export interface EvidenceGroup {
+  hit: boolean;
+  items: Evidence[];
+}
+
+export interface StockProfile {
+  basis_sector: string | null;
+  basis_sector_name: string | null;
+  basis_level: SectorLevel | null;
+  identity: {
+    concepts: string[];
+    is_concept_stock: boolean;
+    amount_tier: string | null;
+    indices: string[];
+    board: string | null;
+    float_mv_tier: string | null;
+  } | null;
+  exclusions: Record<"control" | "crash" | "untradable", EvidenceGroup> | null;
+  tradable: boolean;
+  score: number | null;
+  score_tier: string | null;
+  score_components: ScoreComponents | null;
+}
+
+export interface ScoreComponents {
+  items: { key: string; name: string; value: number | null; max: number }[];
+  penalty: number | null;
+  penalty_reasons: string[];
+}
+
+export interface StockRoleRow {
+  sector_id: string;
+  sector_name: string | null;
+  level: SectorLevel | null;
+  role: Role;
+  tags: string[] | null;
+  score: number | null;
+  score_components: ScoreComponents | null;
+  evidence: EvidenceMap | null;
+}
+
+export interface StockActionRow {
+  sector_id: string;
+  sector_name: string | null;
+  list_type: ListType;
+  point_type: string | null;
+  basis_level: string;
+  tags: string[] | null;
+  evidence: EvidenceMap | null;
+  invalidation: unknown;
 }
 
 export interface SectorHistoryRow {
@@ -216,10 +376,17 @@ export interface StockDetail {
   bar: Record<string, number | boolean | null> | null;
   flow: Record<string, number | boolean | null> | null;
   features: Record<string, number | boolean | null> | null;
-  roles: unknown[];
+  roles: StockRoleRow[];
   indices: IndexRow[];
-  hold_eval: { eval: string; changed_from: string | null; evidence: unknown } | null;
+  hold_eval: {
+    eval: HoldEval;
+    changed_from: HoldEval | null;
+    evidence: { text?: string; items?: string[] } | null;
+  } | null;
   hints: HintRow[];
+  profile: StockProfile | null;
+  actions: StockActionRow[];
+  tracking: TrackingRow[];
   marks: { marked_at: string; mark: string; note: string | null }[];
 }
 

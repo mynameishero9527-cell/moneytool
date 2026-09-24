@@ -61,6 +61,9 @@ const linkQuery = computed(() => (store.isReplay ? { date: store.date, segment: 
     <nav>
       <router-link :to="{ name: 'market', query: linkQuery }">总览</router-link>
       <router-link :to="{ name: 'board', query: linkQuery }">看板</router-link>
+      <router-link :to="{ name: 'actions', query: linkQuery }">行动</router-link>
+      <router-link :to="{ name: 'watchlist', query: linkQuery }">自选</router-link>
+      <router-link :to="{ name: 'review' }">回看</router-link>
       <router-link :to="{ name: 'status', query: linkQuery }">数据状态</router-link>
     </nav>
     <div class="spacer" />

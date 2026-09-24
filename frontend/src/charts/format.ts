@@ -44,6 +44,47 @@ export const REGIME_LABEL: Record<string, string> = {
   none: "无主线",
 };
 
+export const ROLE_LABEL: Record<string, string> = {
+  core: "核心",
+  follow: "跟随",
+  avoid: "规避",
+  other: "一般成分",
+};
+
+export const HOLD_LABEL: Record<string, string> = { intact: "完好", review: "需复核", broken: "已破坏" };
+
+export const LIST_LABEL: Record<string, string> = {
+  buy: "买入关注",
+  buy_invalid: "买入关注失效",
+  sell: "卖出关注",
+  hold_watch: "持有观察",
+  point: "买卖点",
+  lowbase: "低位企稳",
+  bought: "已标记买入",
+};
+
+export const POINT_LABEL: Record<string, string> = {
+  start_confirm: "启动确认",
+  pullback_hold: "回踩不破",
+  breakout: "放量突破",
+  low_base: "低位企稳",
+  climax: "阶段性高潮",
+  diverge: "背离",
+  broken: "结构破坏",
+  ebb: "周期退潮",
+  expire: "跟踪期满",
+};
+
+export const INDEX_LABEL: Record<string, string> = {
+  sector_sentiment: "板块情绪指数",
+  sector_risk: "板块风险指数",
+  stock_risk: "个股风险指数",
+  retail_pressure: "散户压力指数",
+  market_pressure: "市场情绪压力指数",
+};
+
+export const SECTOR_TIER_LABEL: Record<string, string> = { focus: "可关注", watch: "观察", avoid: "不参与" };
+
 /** 金额 → 亿，2 位 */
 export function yi(v: number | null | undefined, digits = 2): string {
   if (v === null || v === undefined || Number.isNaN(v)) return "—";
