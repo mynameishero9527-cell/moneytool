@@ -33,7 +33,9 @@ def ols_slope(col: str, window: int, ratio: float) -> pl.Expr:
     """
     centered = [i - (window - 1) / 2 for i in range(window)]
     denom = sum(w * w for w in centered)
-    return pl.col(col).rolling_sum(window_size=window, weights=centered, min_samples=window) / denom
+    # Polars 带权 rolling 不支持 null；窗口短（≤ 5），用 shift 展开。任一值为 null → 结果 null。
+    terms = [pl.col(col).shift(window - 1 - i) * w for i, w in enumerate(centered) if w != 0]
+    return pl.sum_horizontal(terms, ignore_nulls=False) / denom
 
 
 def rolling_pct_rank(col: str, window: int, ratio: float, grid: int = 20) -> pl.Expr:
