@@ -14,7 +14,8 @@ paths: ["moneytool/adapters/**"]
 
 ```python
 class Adapter(Protocol):
-    source: str                      # "eastmoney" | "baostock" | "shenwan" | "csindex" | "cninfo" | "external"
+    source: str  # "eastmoney" | "baostock" | "shenwan" | "csindex" | "cninfo" | "external"
+
     def fetch(self, endpoint: str, **params) -> pl.DataFrame: ...
     def contract(self, endpoint: str) -> Contract: ...
     def health(self) -> HealthReport: ...
@@ -38,10 +39,10 @@ class Adapter(Protocol):
 ```python
 @dataclass(frozen=True)
 class Contract:
-    columns: dict[str, pl.DataType]   # 标准化后的列名与类型
+    columns: dict[str, pl.DataType]  # 标准化后的列名与类型
     required_non_null: tuple[str, ...]
     min_rows: int
-    unit_notes: str                   # 写明源单位与转换
+    unit_notes: str  # 写明源单位与转换
 ```
 
 契约放 `adapters/contracts/<source>.py`，测试 `tests/adapters/test_contracts.py` 用录制响应逐个验证。AkShare 升级前先跑这组测试。

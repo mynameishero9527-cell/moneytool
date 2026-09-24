@@ -13,18 +13,20 @@ paths: ["moneytool/rules/**", "moneytool/compute/**", "moneytool/params/**"]
 ```python
 @dataclass(frozen=True)
 class Evidence:
-    rule: str            # 规则名，如 "stage.start.inflow_turn_positive"
-    metric: str          # 指标列名
+    rule: str  # 规则名，如 "stage.start.inflow_turn_positive"
+    metric: str  # 指标列名
     value: float | None  # 当日值
     threshold: float | None
-    op: str              # ">=", "<", "in", ...
+    op: str  # ">=", "<", "in", ...
     hit: bool
-    note: str = ""       # 可选说明，如「板块近 20 日 90 分位」
+    note: str = ""  # 可选说明，如「板块近 20 日 90 分位」
+
 
 @dataclass(frozen=True)
 class RuleResult:
     hit: bool
     evidence: tuple[Evidence, ...]
+
 
 def rule_xxx(row: FeatureRow, p: Params) -> RuleResult: ...
 ```
