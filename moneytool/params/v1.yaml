@@ -1,0 +1,170 @@
+# 参数版本 v1。对应需求 0.7。只新增版本文件，不修改已发布版本（AGENTS.md）。
+version: v1
+effective_from: 2020-01-01
+note: 初始版本。全部阈值取需求 6.2、6.3、7.x、8.x 的初始默认，未经历史样本调优。
+
+windows:            # 需求 6.2
+  pulse: 1
+  short: 3
+  persist: 5
+  cycle: 20
+  long: 60
+  year: 250
+  min_valid_ratio: 0.6       # 窗口内有效样本不足 60% → null
+
+qualifiers:         # 需求 6.3
+  significant_multiple: 2.0  # 显著高于均值
+  clear_pp: 0.02             # 明显为负 / 明显弱于：落后 2 个百分点
+  majority_ratio: 0.6        # 大部分
+  extreme_pct: 0.9           # 极端：自身近 20 日 90 分位
+  flat_abs_pct: 0.01         # 接近 0
+  volume_multiple: 1.5       # 放量
+  large_outflow_pct: 0.1     # 大幅净流出：后 10%
+  tail_share: 0.5            # 尾盘异动：尾盘占全天 > 50%
+
+universe:           # 需求 6.1 全 A 等权口径
+  min_listed_days: 20
+  exclude_st: true
+  exclude_bj: true
+  min_members: 8             # 需求 7.4 小样本
+  one_word_amount_ratio: 0.2 # 需求 8.1 一字板：成交额 < 近 20 日均值 20%
+
+stage:              # 需求 7.1
+  freeze:
+    outflow_streak_min: 3          # 持续净流出天数
+    outflow_slowing: true          # 3 日斜率 > 0（流出放缓）
+    breadth_max: 0.4               # 上涨家数占比仍低
+  start:
+    inflow_days_max: 3             # 连续流入天数尚短
+    ret_5d_max: 0.05               # 涨幅还不大
+    breadth_min: 0.45              # 内部开始扩散
+  spread:
+    slope_5d_min: 0.0
+    breadth_min: 0.5
+    concentration_max: 0.6         # 资金不是只堆在 1 只票上
+  climax:
+    concentration_min: 0.5
+    breadth_drop_pp: 0.1           # 上涨家数占比较前一日下降
+  diverge:
+    ret_5d_min: 0.0                # 价格还强
+    breadth_max: 0.45
+  ebb:
+    outflow_streak_min: 2
+    rs_5d_max: 0.0
+  debounce_days: 2
+  history_window: 250              # 需求 7.2 历史路径统计窗口
+
+market:             # 需求 7.3.1 / 7.6
+  mainline_top_n: 3
+  mainline_min_days: 2
+  clear_share_min: 0.5
+  scattered_share_max: 0.3
+  rotation_ratio_lo: 0.5
+  rotation_ratio_hi: 2.0
+  concept_min_members: 8
+  pressure_window: 250
+  pressure_lo_pct: 0.05
+  pressure_hi_pct: 0.95
+  pressure_overheat: 80
+  gate:
+    eqw_drawdown_5d_pct: 0.05      # 全 A 等权 5 日跌幅进入近 250 日最深 5%
+    min_l1_active: 2               # 启动以上一级不足 2 个
+    outflow_days: 3                # 且全市场连续 3 日主力净流出
+    overheat_days: 2               # 情绪压力 ≥ 80 连续 2 日
+    release_days: 2                # 条件全部不成立连续 2 日关闭
+
+role:               # 需求 8.1 / 8.2
+  strong_ratio_top: 0.3
+  core_top: 0.1
+  invalid_ratio_top: 0.5
+  avoid_bottom: 0.3
+  bleed_outflow_days: 4
+  min_inflow_days_of_5: 2          # 「不是仅 1 日流入」
+
+buy:                # 需求 8.3
+  follow_top_share: 0.5
+  position_multiple: 2.0
+  hype_position_multiple: 1.5
+  drawdown_extreme_pct: 0.1
+  min_avg_amount_20d: 50000000     # 5000 万元
+  per_sector_max: 3
+  per_l1_max: 6
+  tracking_days: 20
+  invalid_keep_days: 1
+
+sell:               # 需求 8.4 / 8.8
+  climax_turnover_multiple: 2.0
+  tracking_expire_days: 20
+
+point:              # 需求 8.8
+  start_ratio_top: 0.3
+  breakout_amount_multiple: 1.5
+  breakout_breadth_min: 0.5
+
+lowbase:            # 需求 8.9
+  range_pos_max: 0.3
+  drawdown_min: 0.4
+  no_new_low_days: 10
+  amplitude_ratio_max: 0.7
+  amount_ratio_lo: 0.6
+  amount_ratio_hi: 1.5
+  inflow_days_of_10: 6
+  max_day_ret: 0.07
+  per_l1_max: 3
+  tracking_days: 30
+
+exclude:            # 需求 8.10
+  control_float_mv_max: 3000000000      # 30 亿元
+  control_top10_share_min: 0.7
+  control_low_turnover: 0.005
+  control_big_move: 0.05
+  control_days_of_60: 5
+  crash_run_ret: 0.6
+  crash_run_days: 20
+  crash_drawdown: 0.4
+  crash_drawdown_days: 40
+  crash_events_min: 2
+  crash_years: 3
+  blowup_min: 4
+  blowup_drop: 0.05
+  holders_increase: 0.5
+  holders_drop: 0.4
+  reduction_after_ret: 0.3
+  reduction_min: 2
+  tradable_min_avg_amount_20d: 50000000
+
+score:              # 需求 8.7
+  sector_top: 0.1
+  sector_bottom: 0.1
+  eqw_top: 0.2
+  streak_full: 5
+  normal_lo: 0.1
+  normal_hi: 0.9
+  penalty: 15
+
+tags:               # 需求 8.6 分档（元）
+  amount_tiers: [5000000000, 2000000000, 500000000, 100000000]   # 巨量 / 大 / 中 / 小 / 微
+  float_mv_tiers: [100000000000, 30000000000, 10000000000, 3000000000]
+  index_ids: ["000016.SH", "000300.SH", "000905.SH", "000852.SH", "932000.CSI", "399006.SZ", "000688.SH"]
+
+attribution:        # 需求 7.5
+  seasonal_years: 5
+  seasonal_positive_years_min: 4
+  seasonal_median_pp: 0.02
+  external_corr_min: 0.5
+  external_move_min: 0.03
+  gap_multiple: 1.5
+  hype_limit_pct: 0.9
+  hype_concentration_min: 0.5
+  hype_turnover_multiple: 2.0
+  hype_small_share_min: 0.5
+  min_score: 2
+
+indices:            # 需求 7.6 / 7.7 / 8.11
+  window: 250
+  lo_pct: 0.05
+  hi_pct: 0.95
+  stage_risk: {climax: 20, diverge: 16, spread_second: 12, ebb: 8, start: 4, freeze: 0, spread_first: 8}
+  review_risk_min: 60
+  broken_risk_min: 80
+  retail_review_min: 60
