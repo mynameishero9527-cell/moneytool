@@ -1,6 +1,6 @@
 ---
 name: acceptance-testing
-description: 为 moneytool 编写或维护测试时使用，尤其是把需求第 14 节的 34 条验收标准映射为 pytest、维护历史交易日金样本、构造规则测试的特征行、录制适配器 fixture。
+description: 为 moneytool 编写或维护测试时使用，尤其是把需求第 14 节的 47 条验收标准映射为 pytest、Playwright 端到端、维护历史交易日金样本、构造规则测试的特征行、录制适配器 fixture。
 paths: ["tests/**"]
 ---
 
@@ -65,6 +65,14 @@ tests/
 - `conftest.py` 提供内存 DuckDB（`:memory:`）+ 全部迁移 + 少量种子数据。
 - 用 `httpx.AsyncClient(app=app)`，断言 `meta.status`、`meta.param_version` 与业务字段。
 - 回看：同一接口传 `trade_date` 为历史日，断言返回 confirmed 快照且不触发计算（用 spy 断言 pipeline 未调用）。
+
+## 端到端（Playwright）
+
+- `tests/e2e/` 用 `@playwright/test`，被测对象是 `python -m moneytool run --data-dir tests/golden/datadir --no-browser --port 8123` 起的真实进程 + 构建产物，不 mock API。
+- 金样本数据目录 `tests/golden/datadir/` 由 `scripts/golden.py build-datadir` 从金样本生成，含 5 个交易日的 confirmed 结果与 300 日历史特征（够 250 日分位）。
+- 覆盖需求 14 节涉及页面的验收条：7、13、33、35、38、40、41、44。每条一个 `test.describe`，标题写条号。
+- 断言文本时用禁用词表反向断言：任何页面 `body` 文本不含第 12 节禁用词。
+- CI 每次 PR 跑，超时 5 分钟；本地 `make e2e`。
 
 ## 覆盖率
 

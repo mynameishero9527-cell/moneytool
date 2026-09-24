@@ -63,6 +63,10 @@ python scripts/build_frontend.py
 6. 更新 `CHANGELOG.md`，打 tag `vX.Y.Z`。
 7. 若 AkShare 版本变更，发布说明里写明并附 doctor 输出。
 
+## DuckDB 升级演练
+
+升级 `duckdb` 依赖版本的 PR 必须：用上一发布版生成的 `tests/fixtures/export/*.zip`（`moneytool export` 产物）在新版本下 `moneytool import` 到空目录，再跑 `pytest -m acceptance`。失败则不升级。CI 任务 `duckdb-upgrade-drill` 在 `pyproject.toml` 的 duckdb 版本变更时触发。
+
 ## 常见启动问题
 
 | 现象 | 处理 |

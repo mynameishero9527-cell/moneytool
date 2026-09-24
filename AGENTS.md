@@ -35,8 +35,23 @@ scripts/            构建、回补、诊断脚本
 - 盘中结果写 `*_intraday`，收盘写 `*_confirmed`，两类表不互相覆盖。
 - 数据缺失就标 `data_quality`，不用昨日值或估算值填补。
 - DuckDB 写连接只归调度线程；API 用只读连接。
-- 每个对外数字带口径元信息（估算 / 已确认 / 盘中 / 未经对账、参数版本）。
-- 页面文案遵守需求 12 节：不出现「稳赚」「必涨」「清仓」「最佳」「杀散户」。
+- 每个对外数字带口径元信息（估算 / 已确认 / 盘中 / 未经对账 / 降级、参数版本）。
+- 页面文案与提示模板遵守需求 12 节：不出现「稳赚」「必涨」「清仓」「满仓」「最佳」「杀散户」「套牢」「值得」「建议持有」「安全」「危险」。
+- 指数（市场情绪压力、板块情绪、板块风险、个股风险、散户承接压力）只描述不决策：规则引擎只读 `risk_gate` 一个布尔量，其余指数不进入任何名单规则。
+- 分析提示由 `hints/templates/*.yaml` 模板拼装，不接生成式模型；每条提示必须带可点击的证据链接。
+- 写库任务（调度、`recompute`、`backfill`）持文件锁 `~/.moneytool/.lock`；命令行在主进程运行时改走 `/api/admin/*`。
+
+## 口径与文档同步
+
+- 口径的权威来源是 `params/*.yaml`（阈值）与 `.cursor/skills/capital-flow-indicators`（公式与列名）。需求文档与架构文档只引用章节号与列名，不复制公式与数字。
+- 改口径的顺序：先改 YAML 或 skill，再改代码与测试，最后回头检查文档里的引用是否仍成立。三处不一致时以 YAML / skill 为准并在 PR 说明。
+- 需求文档新增验收条时，同步更新 `tests/acceptance/` 映射表与需求 14.1 索引。
+
+## 性能
+
+- 收盘全量整链目标 1 分钟内；`scripts/bench.py` 在金样本目录上跑，CI 记录各步耗时，任一步超上次 1.5 倍则失败。
+- 全市场列运算用 Polars 表达式，不写 Python 逐行循环；按板块分组用 `group_by`，不用循环切片。
+- 前端表格超过 200 行用虚拟滚动；ECharts 按需引入组件，不整包引入。
 
 ## 代码质量
 
@@ -48,9 +63,9 @@ scripts/            构建、回补、诊断脚本
 
 ## 需要按需加载的 skills
 
-`.cursor/skills/` 下有十二个 skill。动手前先读相关的那一个：
+`.cursor/skills/` 下有十三个 skill。动手前先读相关的那一个：
 
-- 工程：`python-code-standards`、`backend-fastapi-duckdb`、`frontend-vue-echarts`、`ui-design-system`、`duckdb-schema`、`data-adapter-akshare`、`rules-engine`、`acceptance-testing`、`release-packaging`
+- 工程：`python-code-standards`、`backend-fastapi-duckdb`、`frontend-vue-echarts`、`ui-design-system`、`duckdb-schema`、`data-adapter-akshare`、`rules-engine`、`acceptance-testing`、`release-packaging`、`data-incident-runbook`（数据异常排查）
 - 领域：`a-share-market-knowledge`（交易规则与数据口径）、`capital-flow-indicators`（全部指标公式）、`quant-algorithms`（统计算法与偏差防范）
 
 写任何指标或规则前，先读 `capital-flow-indicators` 与 `quant-algorithms`；涉及涨跌停、停复牌、成分、北向时读 `a-share-market-knowledge`。

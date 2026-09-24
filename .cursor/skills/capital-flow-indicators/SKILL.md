@@ -103,6 +103,33 @@ paths: ["moneytool/compute/**", "moneytool/rules/**"]
 - 外部联动：`corr(sector_pct_chg, external_ret.shift(0), 20 日)`，其中外部资产用**前一交易日**（隔夜）收益对齐 A 股当日；启动前 3 日外部累计变动；`gap_abs_5d / mean(gap_abs, 60) `。
 - 概念炒作：对应行业阶段、`limit_up_ratio` 60 日分位、`concentration_top5`、`sector_turnover / mean(60)`、`small_cap_share`。
 
+## 指数（需求 7.6、7.7、8.11）
+
+通用函数：`percentile_score(x, history, window=250, lo=0.05, hi=0.95) -> int | None`，返回 `x` 在 `history` 近 `window` 个有效值中的分位 `q` 线性映射到 0–20：`q ≤ lo → 0`，`q ≥ hi → 20`，中间 `round((q - lo) / (hi - lo) × 20)`。有效值 < 0.6 × window 时返回 `None`，总分为 `null` 并标「历史不足」。总分 = 五分项之和；任一分项为 `None` 且非降级 → 总分 `null`；降级模式下按可用分项数等比缩放到 100 并标 `degraded`。
+
+五档：0–19 / 20–39 / 40–59 / 60–79 / 80–100。
+
+| 指数 | 表 | 分项列（各 0–20） | 输入列 |
+| --- | --- | --- | --- |
+| 市场情绪压力 `market_pressure` | `market_daily` | `limit_heat`, `turnover_crowd`, `breadth_extreme`, `retail_participation`, `mainline_crowd` | `limit_up_ratio_all` 与 `consecutive_limit_count` 取分位后平均；`amount_all / mean(amount_all, 20)` 与 `turnover_all_weighted` 平均；`abs(breadth_all - 0.5)`；`small_positive_ratio`（`net_small > 0` 股票占比）与 `small_amount_share` 平均；`top3_l1_market_share` |
+| 板块情绪 `sector_sentiment` | `index_daily` | 同上五列 | `limit_up_ratio`+连板数、`sector_turnover / mean(60)`、`abs(breadth - 0.5)`、成分 `net_small > 0` 占比、`concentration_top5`；分位用板块自身 250 日 |
+| 板块风险 `sector_risk` | `index_daily` | `stage_risk`, `position_risk`, `divergence_risk`, `crowding_risk`, `attribution_risk` | 阶段直接映射（高潮 20 / 分歧 16 / 扩散后半 12 / 退潮 8 / 启动 4 / 冰点 0）；`sector_ret_20d` 自身 250 日分位；`divergence = max(0, sector_ret_5d) × max(0, -sector_net_main_5d) / sum(amount, 5)` 取分位；`sector_sentiment / 5`；炒作 3 → 20、2 → 12、1 → 6，周期性或外部联动 ≥ 2 各减 4，下限 0 |
+| 个股风险 `stock_risk` | `index_daily` | `position_risk`, `divergence_risk`, `volatility_risk`, `exclusion_risk`, `sector_risk_carry` | `range_pos_250d`（分位直接用）；`ret_5d > 0 且 net_main_5d < 0` 的程度 `max(0, ret_5d) × max(0, -net_main_5d) / sum(amount, 5)` 取分位；`amplitude_20d / amplitude_60d` 取分位；控盘风险 10 + 历史暴涨暴跌 10（命中即给）；依据板块 `sector_risk / 5` |
+| 散户承接压力 `retail_pressure` | `index_daily` | `small_inflow`, `small_vs_main`, `turnover_surge`, `retail_streak`, `price_gap` | `net_small_ratio` 自身 250 日分位；`net_small - net_main` 归一化 `(net_small - net_main) / amount` 取分位；`turnover / turnover_ma_20d` 取分位；连续 `net_small > 0 且 net_main < 0` 天数（≥ 5 → 20，线性）；`abs(gap_abs_5d)` 取分位 |
+
+### 持有结构评估（需求 8.11）
+
+纯规则，输入个股当日角色行 + 名单行 + 昨日评估：
+
+- `HoldEval.BROKEN`：命中任一卖点（8.8 中 结构破坏 / 周期退潮 / 背离）或角色转规避。
+- `HoldEval.REVIEW`：`stock_rs_5d < 0` 连续 3 日，或 `retention_5d < 0`，或依据板块进入高潮拥挤 / 分歧背离，或 `stock_risk ≥ 80`，或 `retail_pressure ≥ 80`。
+- `HoldEval.INTACT`：以上皆不成立。
+- 每条命中输出 `Evidence`，同角色规则；三态变化写 `hold_eval.changed_from`。
+
+### 分析提示模板
+
+模板在 `moneytool/hints/templates/{sector,stock}.yaml`，每条含 `id`、`tier`（板块 可关注 / 观察 / 不参与；个股 结构完好 / 需复核 / 结构破坏）、`text`（占位符 `{name}` `{stage}` `{days}` `{pattern}` `{risk_tier}` 等）、`requires`（所需证据键）。渲染缺键则跳过该句；首句必渲染，缺键时首句用该 tier 的兜底模板。所有模板与渲染结果过禁用词测试。
+
 ## 边界处理清单
 
 - 任何分母为 0 或窗口内有效样本 < 窗口长度的 60% → null，不算 0。
