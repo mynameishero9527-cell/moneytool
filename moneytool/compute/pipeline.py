@@ -175,7 +175,12 @@ def _prev_clear_streak(prev_market: dict[str, Any] | None) -> int:
 
 
 def _features_json(
-    df: pl.DataFrame, id_col: str, subject_type: str, day: dt.date, version: str
+    df: pl.DataFrame,
+    id_col: str,
+    subject_type: str,
+    day: dt.date,
+    version: str,
+    segment: str | None,
 ) -> pl.DataFrame:
     today = df.filter(pl.col("trade_date") == day)
     if today.is_empty():
@@ -184,6 +189,7 @@ def _features_json(
                 "subject_type": pl.Utf8,
                 "subject_id": pl.Utf8,
                 "trade_date": pl.Date,
+                "segment": pl.Utf8,
                 "param_version": pl.Utf8,
                 "features": pl.Utf8,
             }
@@ -197,6 +203,7 @@ def _features_json(
             "subject_type": [subject_type] * today.height,
             "subject_id": today[id_col].to_list(),
             "trade_date": [day] * today.height,
+            "segment": [segment or "close"] * today.height,
             "param_version": [version] * today.height,
             "features": payload,
         }
@@ -330,9 +337,13 @@ def run(
     # ⑧ 存档
     stage_table = "sector_stage_intraday" if intraday else "sector_stage_confirmed"
     upsert(conn, stage_table, stages)
-    upsert(conn, "feature_daily", _features_json(stock_feat, "code", "stock", day, p.version))
     upsert(
-        conn, "feature_daily", _features_json(sector_feat, "sector_id", "sector", day, p.version)
+        conn, "feature_daily", _features_json(stock_feat, "code", "stock", day, p.version, segment)
+    )
+    upsert(
+        conn,
+        "feature_daily",
+        _features_json(sector_feat, "sector_id", "sector", day, p.version, segment),
     )
     market_out = pl.DataFrame(
         {

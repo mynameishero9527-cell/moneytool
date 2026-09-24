@@ -135,7 +135,7 @@ def test_pipeline_confirmed_end_to_end(db: Database, params: Params) -> None:
         assert market["risk_gate"][0] in (True, False)
         assert market["regime"][0] in ("clear", "scattered", "none")
         feats = conn.execute(
-            "SELECT subject_type, count(*) FROM feature_daily WHERE trade_date = ? GROUP BY 1",
+            "SELECT subject_type, count(*) FROM feature_daily WHERE trade_date = ? AND segment = 'close' GROUP BY 1",
             [dates[-1]],
         ).fetchall()
         assert dict(feats) == {"stock": 30, "sector": 3}

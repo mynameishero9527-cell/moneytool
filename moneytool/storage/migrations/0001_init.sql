@@ -117,9 +117,10 @@ CREATE TABLE IF NOT EXISTS feature_daily (
     subject_type VARCHAR NOT NULL,      -- stock / sector
     subject_id VARCHAR NOT NULL,
     trade_date DATE NOT NULL,
+    segment VARCHAR NOT NULL DEFAULT 'close',
     param_version VARCHAR NOT NULL,
     features JSON NOT NULL,             -- 6.1 派生量，列名见 capital-flow-indicators skill
-    PRIMARY KEY (subject_type, subject_id, trade_date, param_version)
+    PRIMARY KEY (subject_type, subject_id, trade_date, segment, param_version)
 );
 
 CREATE TABLE IF NOT EXISTS market_daily (

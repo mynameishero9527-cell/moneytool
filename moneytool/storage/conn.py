@@ -35,19 +35,16 @@ class Database:
 
     @contextmanager
     def read(self) -> Iterator[duckdb.DuckDBPyConnection]:
-        """只读连接。内存库回退到写连接的 cursor。"""
-        if self._is_memory:
-            cur = self._rw.cursor()
-            try:
-                yield cur
-            finally:
-                cur.close()
-            return
-        conn = duckdb.connect(self.path, read_only=True)
+        """读连接：写连接的独立 cursor（各自事务、可跨线程；MVCC 下读不阻塞写）。
+
+        DuckDB 不允许同一进程对同一文件再开 `read_only=True` 连接，因此"只读"由约定保证：
+        API 层只经这里取连接，且不执行写语句（写一律走 `write()`）。
+        """
+        cur = self._rw.cursor()
         try:
-            yield conn
+            yield cur
         finally:
-            conn.close()
+            cur.close()
 
     def checkpoint(self) -> None:
         with self._write_lock:
