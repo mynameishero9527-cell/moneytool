@@ -48,4 +48,9 @@ scripts/            构建、回补、诊断脚本
 
 ## 需要按需加载的 skills
 
-`.cursor/skills/` 下有 UI 设计、前端、后端、代码规范、数据适配器、规则引擎、DuckDB、验收测试、打包发布九个 skill。动手前先读相关的那一个。
+`.cursor/skills/` 下有十二个 skill。动手前先读相关的那一个：
+
+- 工程：`python-code-standards`、`backend-fastapi-duckdb`、`frontend-vue-echarts`、`ui-design-system`、`duckdb-schema`、`data-adapter-akshare`、`rules-engine`、`acceptance-testing`、`release-packaging`
+- 领域：`a-share-market-knowledge`（交易规则与数据口径）、`capital-flow-indicators`（全部指标公式）、`quant-algorithms`（统计算法与偏差防范）
+
+写任何指标或规则前，先读 `capital-flow-indicators` 与 `quant-algorithms`；涉及涨跌停、停复牌、成分、北向时读 `a-share-market-knowledge`。

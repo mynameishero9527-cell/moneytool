@@ -356,3 +356,6 @@ APScheduler 进程内运行，任务依赖用显式串联而不是依赖图，�
 | `duckdb-schema` | 表命名、快照表、迁移、读写连接分离 |
 | `acceptance-testing` | 需求 14 节 34 条验收到测试的映射与金样本维护 |
 | `release-packaging` | 构建前端、打包 wheel、版本号、`python -m moneytool` 启动检查 |
+| `a-share-market-knowledge` | A 股交易时段、涨跌停与连板、停复牌与 ST、资金流分档、申万与指数体系、北向披露、口径陷阱 |
+| `capital-flow-indicators` | 需求 6.1 全部派生量与 8.7 / 7.5 / 8.9 指标的精确公式、列名、窗口、边界处理 |
+| `quant-algorithms` | 滚动统计、OLS 斜率、分组分位、状态机防抖、滞后相关、季节性、事后统计、前视与幸存者偏差防范 |
