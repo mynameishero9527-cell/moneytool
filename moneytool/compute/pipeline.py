@@ -14,6 +14,7 @@ from typing import Any
 import duckdb
 import polars as pl
 
+from moneytool.compute.chain import run_chain
 from moneytool.compute.features import compute_stock_features
 from moneytool.compute.market import (
     ACTIVE_STAGES,
@@ -50,6 +51,7 @@ class PipelineResult:
     sector_rows: int = 0
     stage_rows: int = 0
     notes: list[str] = field(default_factory=list)
+    chain_counts: dict[str, int] = field(default_factory=dict)
 
 
 # ---------- 输入装载 ----------
@@ -62,13 +64,16 @@ def load_stock_inputs(
     return conn.execute(
         """
         WITH cal AS (
-            SELECT trade_date FROM trade_calendar WHERE is_open AND trade_date <= ?
-            ORDER BY trade_date DESC LIMIT ?
+            SELECT trade_date, row_number() OVER (ORDER BY trade_date) AS cal_idx
+            FROM (
+                SELECT trade_date FROM trade_calendar WHERE is_open AND trade_date <= ?
+                ORDER BY trade_date DESC LIMIT ?
+            )
         )
         SELECT b.code, b.trade_date,
                f.net_main, f.net_super, f.net_large, f.net_medium, f.net_small,
                b.open, b.high, b.low, b.close, b.pre_close, b.amount, b.turnover, b.pct_chg,
-               b.adj_factor, b.limit_up, b.float_mv
+               b.adj_factor, b.limit_up, b.float_mv, cal.cal_idx
         FROM bar_daily b
         JOIN cal USING (trade_date)
         LEFT JOIN flow_daily f USING (code, trade_date)
@@ -280,6 +285,8 @@ def run(
             result.notes.append("盘中无快照")
             return result
         # 东财净占比反推成交额；缺则昨日成交额近似（只影响盘中比例，收盘会被正式值覆盖）
+        next_idx = (int(hist["cal_idx"].max() or 0) + 1) if not hist.is_empty() else 1  # type: ignore[arg-type]
+        today = today.with_columns(cal_idx=pl.lit(next_idx, dtype=pl.Int64))
         hist = pl.concat([hist, today.select(hist.columns)], how="vertical_relaxed")
     if hist.is_empty():
         result.data_status = DataStatus.MISSING
@@ -366,6 +373,24 @@ def run(
         prev_clear,
         p,
     )
+
+    # ⑤–⑦ 角色 / 名单 / 指数 / 提示（写回阶段归因）
+    chain = run_chain(
+        conn,
+        p,
+        day,
+        segment,
+        stock_feat=stock_feat,
+        sector_feat=sector_feat,
+        stages=stages,
+        sector_meta=sector_meta,
+        members=members,
+        security=security,
+        eqw_ret_5d=market_row.get("eqw_ret_5d"),
+        gate=gate,
+    )
+    stages = chain.stages.select(stages.columns)
+    result.chain_counts = chain.counts
 
     # ⑧ 存档
     stage_table = "sector_stage_intraday" if intraday else "sector_stage_confirmed"

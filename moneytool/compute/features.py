@@ -39,6 +39,67 @@ def _check(df: pl.DataFrame) -> None:
         raise ValueError(f"feature 输入缺列: {missing}")
 
 
+def _role_inputs(df: pl.DataFrame, p: Params) -> pl.DataFrame:
+    """需求 8.1–8.11 角色、名单、排除标签与指数用到的派生量。"""
+    w = p.windows
+    r = w.min_valid_ratio
+    over = "code"
+    ex = p.exclude
+    df = df.with_columns(
+        turnover_sum_20d=q.rolling_sum("turnover", w.cycle, r).over(over),
+        _amt_close=pl.col("amount") * pl.col("close_adj"),
+        _low_turn_big=(
+            (pl.col("turnover") < ex.control_low_turnover)
+            & (pl.col("pct_chg").abs() >= ex.control_big_move)
+        ).cast(pl.Int32),
+        _new_low_60=(pl.col("low_adj") <= pl.col("low_60d").shift(1).over(over)).cast(pl.Int32),
+        _outflow_day=(pl.col("net_main") < 0).cast(pl.Int32),
+        _abs_ratio=pl.col("main_ratio").abs(),
+        amount_ma_20d_prev=pl.col("amount_ma_20d").shift(1).over(over),
+        main_ratio_5d=q.safe_div(pl.col("net_main_5d"), pl.col("amount_5d")),
+        amount_5d_vs_60d=q.safe_div(pl.col("amount_5d") / w.persist, pl.col("amount_ma_60d")),
+        amplitude_20_60=q.safe_div(pl.col("amplitude_20d"), pl.col("amplitude_60d")),
+        amplitude_5_60=q.safe_div(pl.col("amplitude_5d"), pl.col("amplitude_60d")),
+    )
+    df = df.with_columns(
+        vwap_20d=q.safe_div(
+            q.rolling_sum("_amt_close", w.cycle, r), q.rolling_sum("amount", w.cycle, r)
+        ).over(over),
+        low_turn_big_move_60d=q.rolling_sum("_low_turn_big", w.long, r).over(over),
+        new_low_60d_10d=pl.col("_new_low_60").fill_null(0).rolling_sum(10).over(over),
+        outflow_days_5d=q.rolling_sum("_outflow_day", w.persist, r).over(over),
+        main_ratio_abs_mean_20d=q.rolling_mean("_abs_ratio", w.cycle, r).over(over),
+        drawdown_20d_pct_20d=q.rolling_pct_rank("drawdown_20d", w.cycle, r).over(over),
+    )
+    # 缩量回落日：下跌，且主力净流出占成交额比例不超过自身近 20 日均值（需求 8.8 回踩不破）
+    df = df.with_columns(
+        vwap_gap_20d=q.safe_div(pl.col("close_adj"), pl.col("vwap_20d")) - 1,
+        _soft_pullback=(pl.col("pct_chg") < 0)
+        & (-pl.col("main_ratio") <= pl.col("main_ratio_abs_mean_20d"))
+        & (pl.col("close_adj") >= pl.col("ma_10")),
+    )
+    df = df.with_columns(
+        pullback_hold=(
+            (
+                pl.col("_soft_pullback").shift(1).over(over)
+                | pl.col("_soft_pullback").shift(2).over(over)
+                | pl.col("_soft_pullback").shift(3).over(over)
+            )
+            & (pl.col("net_main") > 0)
+            & (pl.col("close_adj") >= pl.col("ma_10"))
+        ).fill_null(False),
+    )
+    if "cal_idx" in df.columns:
+        df = df.with_columns(
+            is_resumed=((pl.col("cal_idx") - pl.col("cal_idx").shift(1).over(over)) > 1).fill_null(
+                False
+            )
+        )
+    else:
+        df = df.with_columns(is_resumed=pl.lit(False))
+    return df
+
+
 def compute_stock_features(df: pl.DataFrame, p: Params) -> pl.DataFrame:
     """对全市场多日数据一次算出全部个股派生量。按 code 分组的窗口用 `over("code")`。"""
     _check(df)
@@ -168,8 +229,10 @@ def compute_stock_features(df: pl.DataFrame, p: Params) -> pl.DataFrame:
         ).fill_null(False),
         is_consecutive_limit=pl.col("limit_streak") >= 2,
     )
+    df = _role_inputs(df, p)
 
     return df.drop(
         [c for c in df.columns if c.startswith("_")]
         + ["adj", "prev_close_adj", "super_share_mean_5d"]
+        + (["cal_idx"] if "cal_idx" in df.columns else [])
     )

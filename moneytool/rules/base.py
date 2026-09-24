@@ -64,7 +64,9 @@ def compare(
     """对 `row[metric]` 做一次比较并返回证据。值缺失时 `hit=False` 并在 note 标「数据缺失」。"""
     value = _as_float(row.get(metric))
     if value is None or (threshold is None and op not in ("is_true", "is_false")):
-        return Evidence(rule, metric, value, threshold, op, False, note or "数据缺失")
+        return Evidence(
+            rule, metric, value, threshold, op, False, f"{note}（数据缺失）" if note else "数据缺失"
+        )
     hit = _apply(op, value, threshold)
     return Evidence(rule, metric, value, threshold, op, hit, note)
 

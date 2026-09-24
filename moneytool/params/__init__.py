@@ -275,10 +275,15 @@ def load_params_file(path: Path) -> Params:
     return Params.model_validate(raw)
 
 
+def _version_number(version: str) -> int:
+    digits = version.lstrip("vV")
+    return int(digits) if digits.isdigit() else 0
+
+
 def list_versions(params_dir: Path) -> list[Params]:
     """目录下全部版本，按生效日升序。"""
     versions = [load_params_file(p) for p in sorted(params_dir.glob("v*.yaml"))]
-    versions.sort(key=lambda p: (p.effective_from, p.version))
+    versions.sort(key=lambda p: (p.effective_from, _version_number(p.version)))
     return versions
 
 
@@ -316,7 +321,7 @@ def install_builtin_params(params_dir: Path) -> list[str]:
 def new_version(params_dir: Path, effective_from: dt.date, note: str) -> Path:
     """`params new`：复制最新版本为 v{n+1}，改 version / effective_from / note。"""
     latest = latest_params(params_dir)
-    n = int(latest.version.lstrip("v")) + 1
+    n = max(_version_number(v.version) for v in list_versions(params_dir)) + 1
     src = params_dir / f"{latest.version}.yaml"
     dst = params_dir / f"v{n}.yaml"
     with src.open(encoding="utf-8") as f:
