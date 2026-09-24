@@ -24,6 +24,7 @@ from moneytool.compute.actions import (
     update_tracking,
 )
 from moneytool.compute.attribution import compute_attribution
+from moneytool.compute.extra import today_own_percentiles
 from moneytool.compute.hints import hint_rows, hold_eval, hold_text, sector_hint, stock_hint
 from moneytool.compute.indices import (
     RETAIL_ITEMS,
@@ -146,6 +147,18 @@ def run_chain(
     sector_today = sector_feat.filter(pl.col("trade_date") == day)
     if stock_today.is_empty() or sector_today.is_empty():
         return ChainResult(stages, counts)
+    # 需求 8.3 第 6 条：当前回撤在自身近 20 日回撤分布中的位置（只需当日值）
+    stock_today = stock_today.join(
+        today_own_percentiles(
+            stock_feat,
+            "code",
+            day,
+            {"drawdown_20d_pct_20d": ("drawdown_20d", p.windows.cycle)},
+            p.windows.min_valid_ratio,
+        ),
+        on="code",
+        how="left",
+    )
 
     # 概念主导行业
     dom = dominant_l1(members, stock_today)

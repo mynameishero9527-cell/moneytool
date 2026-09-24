@@ -56,6 +56,7 @@ def _role_inputs(df: pl.DataFrame, p: Params) -> pl.DataFrame:
         _outflow_day=(pl.col("net_main") < 0).cast(pl.Int32),
         _abs_ratio=pl.col("main_ratio").abs(),
         amount_ma_20d_prev=pl.col("amount_ma_20d").shift(1).over(over),
+        net_main_prev_5d=pl.col("net_main_5d").shift(w.persist).over(over),
         main_ratio_5d=q.safe_div(pl.col("net_main_5d"), pl.col("amount_5d")),
         amount_5d_vs_60d=q.safe_div(pl.col("amount_5d") / w.persist, pl.col("amount_ma_60d")),
         amplitude_20_60=q.safe_div(pl.col("amplitude_20d"), pl.col("amplitude_60d")),
@@ -69,7 +70,6 @@ def _role_inputs(df: pl.DataFrame, p: Params) -> pl.DataFrame:
         new_low_60d_10d=pl.col("_new_low_60").fill_null(0).rolling_sum(10).over(over),
         outflow_days_5d=q.rolling_sum("_outflow_day", w.persist, r).over(over),
         main_ratio_abs_mean_20d=q.rolling_mean("_abs_ratio", w.cycle, r).over(over),
-        drawdown_20d_pct_20d=q.rolling_pct_rank("drawdown_20d", w.cycle, r).over(over),
     )
     # 缩量回落日：下跌，且主力净流出占成交额比例不超过自身近 20 日均值（需求 8.8 回踩不破）
     df = df.with_columns(

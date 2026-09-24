@@ -156,6 +156,14 @@ def avoid_rules(row: FeatureRow, p: Params) -> dict[str, RuleResult]:
                 None,
                 "5 日上涨或创 20 日新高",
             ),
+            compare(
+                "stock.avoid.diverge.was_inflow",
+                row,
+                "net_main_prev_5d",
+                ">",
+                0.0,
+                "此前 5 日主力净额（转为流出）",
+            ),
             compare("stock.avoid.diverge.outflow", row, "net_main_5d", "<", 0.0, "近 5 日主力净额"),
             compare(
                 "stock.avoid.diverge.side",

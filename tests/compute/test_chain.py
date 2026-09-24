@@ -77,7 +77,7 @@ def test_avoid_types(params: Params) -> None:
     assert avoid_rules(follow_down, params)["follow_down"].hit
     bleed = _strong_row(outflow_days_5d=4, retention_5d=-1e6)
     assert avoid_rules(bleed, params)["bleed"].hit
-    diverge = _strong_row(net_main_5d=-1e7, ratio_top=0.8)
+    diverge = _strong_row(net_main_5d=-1e7, net_main_prev_5d=2e7, ratio_top=0.8)
     hits = avoid_rules(diverge, params)
     assert hits["diverge_out"].hit
     assert not avoid_rules(_strong_row(), params)["diverge_out"].hit
