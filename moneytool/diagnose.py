@@ -17,6 +17,7 @@ import duckdb
 
 from moneytool import __version__
 from moneytool.config import Settings
+from moneytool.network import apply_network, system_proxies
 
 LOG_ERROR_LEVELS = ("error", "critical", "exception")
 TEXT_ERROR_MARKERS = ("Traceback", "ERROR", "Exception")
@@ -99,7 +100,12 @@ def _http_summary(settings: Settings) -> dict[str, Any]:
     if host in ("0.0.0.0", "::", ""):
         host = "127.0.0.1"
     headers = {"Authorization": f"Bearer {settings.server.token}"} if settings.server.token else {}
-    r = httpx.get(f"http://{host}:{settings.server.port}/api/diagnose", headers=headers, timeout=10)
+    r = httpx.get(
+        f"http://{host}:{settings.server.port}/api/diagnose",
+        headers=headers,
+        timeout=httpx.Timeout(10, connect=2),
+        trust_env=False,
+    )
     r.raise_for_status()
     data: dict[str, Any] = r.json()["data"]
     return data
@@ -174,33 +180,41 @@ def build_report(
     if not versions:
         problems.append("没有参数版本：请先运行 python -m moneytool init（或 start.bat）")
     out.append(f"监听:     {settings.server.listen}:{settings.server.port}")
+    sys_proxy = system_proxies()
+    out.append(f"系统代理: {sys_proxy or '无'}")
+    out.append(
+        f'数据源:   {apply_network(settings)}（config.toml [network] proxy = "{settings.network.proxy}"）'
+    )
 
     section("进程与锁")
     holder = read_holder(settings.lock_path)
     out.append(f"写锁持有者: {holder or '无'}")
 
     section("数据库状态")
-    conn, db_state = _open_db(settings)
     summary: dict[str, Any] | None = None
-    if conn is not None:
-        out.append("主程序未运行，直接读取数据库。")
-        try:
-            summary = db_summary(conn)
-        finally:
-            conn.close()
-    elif db_state == "missing":
-        problems.append("数据库不存在：请先运行 python -m moneytool init（或 start.bat）")
-        out.append("数据库不存在。")
-    elif db_state == "locked":
-        out.append("主程序正在运行（数据库被占用），通过本机接口读取。")
-        try:
-            summary = _http_summary(settings)
-        except Exception as exc:
+    try:
+        summary = _http_summary(settings)
+        out.append("主程序正在运行，通过本机接口读取。")
+    except Exception:
+        summary = None
+    if summary is None:
+        conn, db_state = _open_db(settings)
+        if conn is not None:
+            out.append("主程序未运行（本机接口无响应），直接读取数据库。")
+            try:
+                summary = db_summary(conn)
+            finally:
+                conn.close()
+        elif db_state == "missing":
+            problems.append("数据库不存在：请先运行 python -m moneytool init（或 start.bat）")
+            out.append("数据库不存在。")
+        elif db_state == "locked":
             problems.append(
-                f"数据库被占用但本机接口不可达（{exc}）：可能有残留进程，关闭所有 moneytool 窗口后重试"
+                "数据库被其他进程占用但本机接口无响应：可能有残留的 moneytool 进程，"
+                "关闭所有 moneytool 窗口（或在任务管理器结束 python.exe）后重试"
             )
-    else:
-        problems.append(f"数据库打开失败：{db_state}")
+        else:
+            problems.append(f"数据库打开失败：{db_state}")
 
     if summary is not None:
         c = summary["counts"]
@@ -269,13 +283,25 @@ def build_report(
         from moneytool.adapters.registry import build_adapters  # noqa: PLC0415
         from moneytool.scheduler.jobs import clock_drift_seconds  # noqa: PLC0415
 
-        ad = build_adapters(settings)
+        probe = settings.model_copy(deep=True)
+        for name in ("eastmoney", "baostock", "shenwan", "csindex"):
+            limit = getattr(probe.rate_limit, name)
+            limit.backoff_seconds = ()
+            limit.timeout_seconds = min(limit.timeout_seconds, 15.0)
+        ad = build_adapters(probe)
         for h in ad.health():
             if h.get("ok"):
                 out.append(f"{h['source']:<10} 正常 · {h.get('rows', '')} 行 · {h.get('ms')} ms")
             else:
-                out.append(f"{h['source']:<10} 失败 · {str(h.get('error'))[:300]}")
-                problems.append(f"数据源 {h['source']} 连不上：{str(h.get('error'))[:120]}")
+                err = str(h.get("error"))
+                out.append(f"{h['source']:<10} 失败 · {err[:300]}")
+                if "ProxyError" in err or "proxy" in err.lower():
+                    problems.append(
+                        f'数据源 {h["source"]} 被代理拦截：把 config.toml 的 [network] proxy 设为 "direct"'
+                        "（默认值），或关闭 VPN / 代理软件的系统代理后重启程序"
+                    )
+                else:
+                    problems.append(f"数据源 {h['source']} 连不上：{err[:120]}")
         drift = clock_drift_seconds(ad)
         out.append(f"时钟偏差: {'未知' if drift is None else f'{drift:.0f} 秒'}")
         if drift is not None and abs(drift) > settings.schedule.clock_drift_warn_seconds:
