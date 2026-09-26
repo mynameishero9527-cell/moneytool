@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import importlib
+import socket
 import threading
 from collections.abc import Callable
 from typing import Any
@@ -32,6 +34,8 @@ def _rows(rs: Any) -> pl.DataFrame:
     data: list[list[str]] = []
     while rs.next():
         data.append(rs.get_row_data())
+    if rs.error_code != "0":  # 翻页请求失败时 next() 返回 False，不能当作数据已取完
+        raise AdapterError(SOURCE, "query", f"{rs.error_code} {rs.error_msg}")
     fields: list[str] = list(rs.fields)
     if not data:
         return pl.DataFrame({f: pl.Series(f, [], dtype=pl.Utf8) for f in fields})
@@ -53,14 +57,36 @@ def _d(col: str) -> pl.Expr:
     )
 
 
+class _GuardedSocket:
+    """包住 baostock 的全局 socket：库本身不设超时，且对端关闭后 recv 返回空会死循环。"""
+
+    def __init__(self, sock: socket.socket, timeout: float) -> None:
+        sock.settimeout(timeout)
+        self._sock = sock
+
+    def send(self, data: bytes) -> int:
+        return self._sock.send(data)
+
+    def recv(self, size: int) -> bytes:
+        chunk = self._sock.recv(size)
+        if not chunk:
+            raise ConnectionError("baostock 服务器关闭了连接")
+        return chunk
+
+    def close(self) -> None:
+        self._sock.close()
+
+
 class BaostockAdapter:
+    """baostock 库全进程只有一个 socket 会话，查询不能并发：所有请求在 `_lock` 内串行。"""
+
     source = SOURCE
 
     def __init__(self, ctx: FetchContext, bs: Any | None = None) -> None:
         self.ctx = ctx
         self._bs = bs
         self._logged_in = False
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     @property
     def bs(self) -> Any:
@@ -77,7 +103,35 @@ class BaostockAdapter:
             lg = self.bs.login()
             if getattr(lg, "error_code", "0") != "0":
                 raise AdapterError(SOURCE, "login", f"{lg.error_code} {lg.error_msg}")
+            self._guard_socket()
             self._logged_in = True
+
+    def _guard_socket(self) -> None:
+        try:
+            context: Any = importlib.import_module("baostock.common.context")
+        except ImportError:  # 测试替身
+            return
+        sock = getattr(context, "default_socket", None)
+        if isinstance(sock, socket.socket):
+            context.default_socket = _GuardedSocket(sock, self.ctx.rate.timeout_seconds)
+
+    def _drop_session(self) -> None:
+        """网络异常后 socket 里可能残留半截响应，丢弃会话，下次请求重新登录。"""
+        with self._lock:
+            if not self._logged_in:
+                return
+            self._logged_in = False
+            try:
+                context: Any = importlib.import_module("baostock.common.context")
+            except ImportError:
+                return
+            sock = getattr(context, "default_socket", None)
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError as exc:
+                    log.debug("baostock_socket_close_failed", error=str(exc))
+                context.default_socket = None
 
     def close(self) -> None:
         if self._logged_in:
@@ -104,9 +158,14 @@ class BaostockAdapter:
             return out
 
         def once() -> pl.DataFrame:
-            self._ensure_login()
-            self.ctx.limiter.wait()
-            return _rows(query())
+            with self._lock:
+                self._ensure_login()
+                self.ctx.limiter.wait()
+                try:
+                    return _rows(query())
+                except Exception:
+                    self._drop_session()
+                    raise
 
         raw = retry(once, source=SOURCE, endpoint=endpoint, backoff=self.ctx.rate.backoff_seconds)
         self.ctx.cache.put(
