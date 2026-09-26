@@ -150,7 +150,7 @@ def build_report(
 ) -> tuple[str, bool]:
     """返回 (报告文本, 是否无问题)。"""
     from moneytool.app import now_sh  # noqa: PLC0415
-    from moneytool.lock import read_holder  # noqa: PLC0415
+    from moneytool.lock import pid_alive, read_holder  # noqa: PLC0415
     from moneytool.params import list_versions  # noqa: PLC0415
 
     out: list[str] = []
@@ -188,19 +188,41 @@ def build_report(
 
     section("进程与锁")
     holder = read_holder(settings.lock_path)
-    out.append(f"写锁持有者: {holder or '无'}")
+    holder_pid = int(holder["pid"]) if holder.get("pid", "").isdigit() else None
+    holder_alive = holder_pid is not None and pid_alive(holder_pid)
+    if holder:
+        state = (
+            "进程仍在运行"
+            if holder_alive
+            else "进程已退出（上次关闭窗口时任务未结束，留下的记录，无影响）"
+        )
+        out.append(f"写锁持有者: {holder}，{state}")
+    else:
+        out.append("写锁持有者: 无")
 
     section("数据库状态")
     summary: dict[str, Any] | None = None
+    web = f"http://127.0.0.1:{settings.server.port}"
+    http_error = ""
     try:
         summary = _http_summary(settings)
-        out.append("主程序正在运行，通过本机接口读取。")
-    except Exception:
+        out.append(f"主程序正在运行（网页与接口 {web} 正常），通过本机接口读取。")
+    except Exception as exc:
         summary = None
+        http_error = f"{type(exc).__name__}: {exc}"[:200]
     if summary is None:
+        if holder_alive:
+            problems.append(
+                f"主程序在运行（进程 {holder_pid}）但网页 {web} 10 秒内无响应（{http_error}）："
+                "重新运行一次 doctor；仍无响应请关闭 moneytool 窗口后重新 start.bat"
+            )
         conn, db_state = _open_db(settings)
         if conn is not None:
-            out.append("主程序未运行（本机接口无响应），直接读取数据库。")
+            out.append(
+                "主程序在运行但本机接口无响应，直接读取数据库。"
+                if holder_alive
+                else f"主程序未运行（{web} 无响应），直接读取数据库。启动请双击 start.bat。"
+            )
             try:
                 summary = db_summary(conn)
             finally:

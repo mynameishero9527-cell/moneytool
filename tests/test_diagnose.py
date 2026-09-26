@@ -78,6 +78,35 @@ def test_report_via_http_when_db_locked(
     assert "证券 30" in text
 
 
+def test_report_tells_stale_lock_from_hung_app(tmp_data_dir: Path) -> None:
+    import os
+
+    init_data_dir(tmp_data_dir)
+    settings = load_settings(tmp_data_dir)
+    settings.server.port = 1  # 保证本机接口连不上
+    holder = settings.lock_path.with_suffix(".holder.json")
+
+    holder.write_text(json.dumps({"owner": "backfill", "pid": "999999999"}), encoding="utf-8")
+    text, _ = build_report(settings, check_sources=False)
+    assert "进程已退出" in text
+    assert "主程序未运行" in text
+
+    holder.write_text(json.dumps({"owner": "backfill", "pid": str(os.getpid())}), encoding="utf-8")
+    text, ok = build_report(settings, check_sources=False)
+    assert "进程仍在运行" in text
+    assert "10 秒内无响应" in text
+    assert not ok
+
+
+def test_pid_alive() -> None:
+    import os
+
+    from moneytool.lock import pid_alive
+
+    assert pid_alive(os.getpid())
+    assert not pid_alive(999999999)
+
+
 def test_log_line_helpers() -> None:
     assert _is_error(json.dumps({"level": "warning", "event": "x"}))
     assert not _is_error(json.dumps({"level": "info", "event": "x"}))

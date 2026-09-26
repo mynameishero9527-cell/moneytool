@@ -42,7 +42,8 @@ echo [3/3] 检查数据目录
 "%VPY%" -m moneytool init
 if errorlevel 1 goto fail
 
-echo 启动 moneytool，浏览器将打开 http://127.0.0.1:8000 ；关闭本窗口或按 Ctrl+C 停止。
+echo 启动 moneytool：网页界面、后台接口、定时采集与历史回补都在这一个程序里，无需另外启动前端。
+echo 浏览器将打开 http://127.0.0.1:8000 ；本窗口需保持打开，关闭本窗口或按 Ctrl+C 即停止全部功能。
 "%VPY%" -m moneytool run %*
 if errorlevel 1 goto fail
 exit /b 0

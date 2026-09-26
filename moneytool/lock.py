@@ -68,14 +68,17 @@ def force_unlock(lock_path: Path) -> bool:
     """`doctor --unlock`：清理残留锁文件。持有进程仍在时拒绝。"""
     holder = read_holder(lock_path)
     pid = holder.get("pid")
-    if pid and _pid_alive(int(pid)):
+    if pid and pid_alive(int(pid)):
         return False
     _holder_path(lock_path).unlink(missing_ok=True)
     lock_path.unlink(missing_ok=True)
     return True
 
 
-def _pid_alive(pid: int) -> bool:
+def pid_alive(pid: int) -> bool:
+    """进程是否仍在运行。Windows 上 `os.kill(pid, 0)` 会直接结束目标进程，必须走 WinAPI。"""
+    if os.name == "nt":
+        return _pid_alive_windows(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -83,3 +86,22 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _pid_alive_windows(pid: int) -> bool:
+    import ctypes  # noqa: PLC0415
+
+    process_query_limited_information = 0x1000
+    still_active = 259
+    error_access_denied = 5
+    kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)  # noqa: B009
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        return bool(getattr(ctypes, "get_last_error")() == error_access_denied)  # noqa: B009
+    try:
+        code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True
+        return code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
