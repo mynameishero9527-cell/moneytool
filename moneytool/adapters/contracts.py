@@ -209,4 +209,32 @@ SINA: dict[str, Contract] = {
             "各档净额按主动买卖统计，合计不为零，与东财口径不同，不能混用。"
         ),
     ),
+    "flow_rank_stock": Contract(
+        columns={
+            "code": pl.Utf8(),
+            "name": pl.Utf8(),
+            "close": pl.Float64(),
+            "pct_chg": pl.Float64(),
+            **FLOW_COLS,
+        },
+        required_non_null=("code",),
+        min_rows=3000,
+        unit_notes=(
+            "新浪 MoneyFlow.ssl_bkzj_ssggzj：r0 特大单、r3 小单净额（元，与日频接口同档同值），"
+            "大单与中单只给合计、各按一半估算；主力 = 特大单 + 大单（估算）；净占比分母为成交额。"
+        ),
+    ),
+    "spot": EASTMONEY["spot"],
+    "concept_list": Contract(
+        columns={
+            "board_code": pl.Utf8(),
+            "name": pl.Utf8(),
+            "pct_chg": pl.Float64(),
+            "up_count": pl.Int64(),
+        },
+        required_non_null=("board_code", "name"),
+        min_rows=50,
+        unit_notes="新浪概念板块（gn_ 开头）；不提供上涨家数。",
+    ),
+    "concept_cons": EASTMONEY["concept_cons"],
 }

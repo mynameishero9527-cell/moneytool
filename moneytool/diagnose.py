@@ -194,6 +194,12 @@ def build_report(
 
     out: list[str] = []
     flow_source = settings.data.flow_source
+    realtime = settings.data.realtime_source
+    fallback = (
+        "盘中分段、收盘快照与概念成分会缺失，"
+        if realtime == "eastmoney"
+        else "盘中分段、收盘快照与概念成分已自动改用新浪（盘中主力为估算，收盘后由日频正式值覆盖），"
+    )
     problems: list[str] = []
 
     def section(title: str) -> None:
@@ -226,7 +232,8 @@ def build_report(
         f'数据源:   {apply_network(settings)}（config.toml [network] proxy = "{settings.network.proxy}"）'
     )
     out.append(
-        f"资金流:   日频来源 {flow_source}，盘中分段来源 eastmoney（config.toml [data] flow_source）"
+        f"资金流:   日频来源 {flow_source}（config.toml [data] flow_source）；"
+        f"盘中分段 / 全 A 快照 / 概念来源 {realtime}（[data] realtime_source，auto = 先东财、限流时改用新浪）"
     )
 
     section("进程与锁")
@@ -382,7 +389,7 @@ def build_report(
                     "RemoteDisconnected" in err or "502" in err
                 ):
                     impact = (
-                        "日频资金流由新浪提供不受影响，只缺盘中分段近似值"
+                        f"日频资金流由新浪提供不受影响；{fallback}"
                         if flow_source == "sina"
                         else "程序会自动暂停并逐次延长间隔；若反复出现，"
                         "调大 [backfill] flow_interval_seconds 或把 [data] flow_source 改为 sina"
@@ -393,7 +400,7 @@ def build_report(
                     )
                 elif h["source"] == "eastmoney实时":
                     problems.append(
-                        "东财实时排名接口（push2.eastmoney.com）不可用：盘中分段与收盘快照会缺失，"
+                        f"东财实时排名接口（push2.eastmoney.com）不可用：{fallback}"
                         f"历史日频回补不受影响。错误：{err[:120]}"
                     )
                 else:

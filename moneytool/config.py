@@ -40,6 +40,8 @@ class DataConfig(BaseModel):
     # 日频资金流来源：sina（个股历史约 8 年）或 eastmoney（只有最近约 120 个交易日）。
     # 两家大小单口径不同，整段历史只用一个来源；改了之后需重建资金流历史（见 README）
     flow_source: Literal["sina", "eastmoney"] = "sina"
+    # 盘中分段资金流、全 A 快照、概念成分的来源：auto 先东财，东财限流 / 封禁时改用新浪
+    realtime_source: Literal["auto", "eastmoney", "sina"] = "auto"
     backfill_years_flow: int = 2
     backfill_years_bars: int = 5
     raw_retention_days: int = 90
@@ -205,6 +207,8 @@ proxy = "direct"
 [data]
 # 日频资金流来源：sina（默认，历史约 8 年）或 eastmoney（约 120 个交易日）；两家口径不同，不混用
 flow_source = "sina"
+# 盘中分段资金流、全 A 快照、概念成分：auto（先东财，限流时自动改用新浪）/ eastmoney / sina
+realtime_source = "auto"
 backfill_years_flow = 2
 backfill_years_bars = 5
 

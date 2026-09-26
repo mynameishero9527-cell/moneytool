@@ -56,7 +56,9 @@ def capture_segment(
     """拉一次今日累计并落 flow_snapshot。返回各主体行数；失败的主体写 data_quality 并跳过。"""
     counts: dict[str, int] = {}
     try:
-        stock = ad.eastmoney.flow_rank_stock(day, segment)
+        source, stock = ad.flow_rank_stock(day, segment)
+        if source != "eastmoney":
+            log.info("realtime_flow_source", source=source, segment=segment, rows=stock.height)
         snap = stock.select(
             pl.lit("stock").alias("subject_type"),
             pl.col("code").alias("subject_id"),
@@ -73,6 +75,9 @@ def capture_segment(
         _quality(conn, "flow_rank_stock", day, segment, exc)
         counts["stock"] = 0
 
+    if "eastmoney" not in ad.realtime_order():
+        # 板块排名只有东财有，计算只用个股资金流汇总，东财不可用时跳过即可
+        return counts
     concept_names = _concept_name_map(conn)
     for kind, sector_type in EM_SECTOR_TYPES.items():
         try:

@@ -164,25 +164,63 @@ class ConceptFetch:
     sectors: pl.DataFrame
     members: list[pl.DataFrame] = field(default_factory=list)
     issues: list[tuple[QualityStatus, str]] = field(default_factory=list)
+    board_codes: list[str] = field(default_factory=list)
+    source: str = "eastmoney"
 
 
-def fetch_concepts(ad: Adapters, day: dt.date, *, max_boards: int | None = None) -> ConceptFetch:
-    """东财概念列表 + 成分（只拉不写，写库锁外调用）。成分是个股级接口，逐个板块串行带间隔。"""
-    boards = ad.eastmoney.concept_list(day)
+def concept_sources(ad: Adapters, existing: str | None) -> list[str]:
+    """已有概念沿用原来源（两家板块划分不同，混在一起会出现两套重复概念）；首次按实时来源顺序。"""
+    if ad.realtime_source != "auto":
+        return [ad.realtime_source]
+    if existing:
+        return [existing]
+    return ad.realtime_order()
+
+
+def fetch_concepts(
+    ad: Adapters,
+    day: dt.date,
+    *,
+    max_boards: int | None = None,
+    existing: str | None = None,
+) -> ConceptFetch:
+    """概念列表 + 成分（只拉不写，写库锁外调用）。东财成分是个股级接口，只取前 `max_boards` 个板块；
+    新浪不封 IP，取全部板块。"""
+    sources = concept_sources(ad, existing)
+    last: AdapterError | None = None
+    for source in sources:
+        try:
+            return _fetch_concepts(ad, source, day, max_boards if source == "eastmoney" else None)
+        except AdapterError as exc:
+            last = exc
+            if source != sources[-1]:
+                log.warning("concept_fallback", source=source, error=str(exc))
+    assert last is not None
+    raise last
+
+
+def _fetch_concepts(
+    ad: Adapters, source: str, day: dt.date, max_boards: int | None
+) -> ConceptFetch:
+    adapter = ad.sina if source == "sina" else ad.eastmoney
+    boards = adapter.concept_list(day)
     out = ConceptFetch(
         boards.select(
             ("concept:" + pl.col("board_code")).alias("sector_id"),
             "name",
             pl.lit(SectorLevel.CONCEPT.value).alias("level"),
             pl.lit(None, dtype=pl.Utf8).alias("parent_id"),
-            pl.lit("eastmoney").alias("source"),
-        )
+            pl.lit(source).alias("source"),
+        ),
+        board_codes=boards["board_code"].to_list(),
+        source=source,
     )
     for i, row in enumerate(out.sectors.iter_rows(named=True)):
         if max_boards is not None and i >= max_boards:
             break
         try:
-            cons = ad.eastmoney.concept_cons(row["name"], day)
+            key = out.board_codes[i] if source == "sina" else row["name"]
+            cons = adapter.concept_cons(key, day)
         except AdapterError as exc:
             captcha = "验证" in exc.reason
             status = QualityStatus.CAPTCHA if captcha else QualityStatus.MISSING
@@ -206,7 +244,7 @@ def store_concepts(
     for status, reason in fetched.issues:
         record_quality(
             conn,
-            source="eastmoney",
+            source=fetched.source,
             endpoint="concept_cons",
             trade_date=day,
             status=status,

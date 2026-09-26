@@ -205,24 +205,36 @@ class JobRunner:
         self.progress.set_stage("backfill")
 
     def _concepts_if_empty(self) -> None:
-        """概念成分走东财、逐板块拉，放在回补空闲时做，不挡住启动后的日线回补。"""
+        """概念成分逐板块拉，放在回补空闲时做，不挡住启动后的日线回补。"""
         day = today_sh()
         with self.ctx.db.read() as conn:
-            has = conn.execute("SELECT 1 FROM sector WHERE level = 'concept' LIMIT 1").fetchone()
+            has = self._concept_source(conn)
         if not has:
             self._sync_concepts(day)
 
+    @staticmethod
+    def _concept_source(conn: duckdb.DuckDBPyConnection) -> str | None:
+        """已有成分的概念来自哪家（只列了板块、成分没拉到的不算）。"""
+        row = conn.execute(
+            "SELECT s.source FROM sector s JOIN sector_member_snapshot m USING (sector_id) "
+            "WHERE s.level = 'concept' LIMIT 1"
+        ).fetchone()
+        return None if row is None else str(row[0])
+
     def _sync_concepts(self, day: dt.date) -> int:
         """逐板块拉成分可能要几分钟，在写库锁外拉，拉完再持锁写入，不挡住其他任务落库。"""
+        with self.ctx.db.read() as conn:
+            existing = self._concept_source(conn)
         try:
-            fetched = fetch_concepts(self.ctx.adapters, day, max_boards=60)
+            fetched = fetch_concepts(self.ctx.adapters, day, max_boards=60, existing=existing)
         except AdapterError as exc:
             reason = str(exc)
+            source = exc.source
 
             def fail(conn: duckdb.DuckDBPyConnection) -> int:
                 record_quality(
                     conn,
-                    source="eastmoney",
+                    source=source,
                     endpoint="concept_list",
                     trade_date=day,
                     status=QualityStatus.MISSING,
@@ -427,11 +439,11 @@ class JobRunner:
 
     def _spot(self, conn: duckdb.DuckDBPyConnection, day: dt.date) -> pl.DataFrame | None:
         try:
-            return self.ctx.adapters.eastmoney.spot(day)
+            return self.ctx.adapters.spot(day)[1]
         except AdapterError as exc:
             record_quality(
                 conn,
-                source="eastmoney",
+                source=exc.source,
                 endpoint="spot",
                 trade_date=day,
                 status=QualityStatus.MISSING,
