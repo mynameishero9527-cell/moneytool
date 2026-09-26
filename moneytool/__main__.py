@@ -153,46 +153,26 @@ def status(data_dir: DataDirOpt = None) -> None:
 
 
 @app.command()
-def doctor(data_dir: DataDirOpt = None) -> None:
-    """自检：数据目录、数据库、参数版本、数据源连通、时钟偏差、锁。"""
-    from moneytool.app import build_context, now_sh  # noqa: PLC0415
-    from moneytool.lock import read_holder  # noqa: PLC0415
-    from moneytool.params import list_versions  # noqa: PLC0415
-    from moneytool.scheduler.jobs import clock_drift_seconds  # noqa: PLC0415
+def doctor(
+    data_dir: DataDirOpt = None,
+    out: Annotated[Path | None, typer.Option("--out", help="同时把报告写入该文件")] = None,
+    log_lines: Annotated[int, typer.Option("--log-lines", help="附带最新日志末尾行数")] = 60,
+    offline: Annotated[bool, typer.Option("--offline", help="跳过数据源连通检查")] = False,
+) -> None:
+    """诊断：环境、锁、数据库与回补进度、失败任务、质量记录、数据源连通、日志错误。主程序运行中也可用。"""
+    from moneytool.config import load_settings  # noqa: PLC0415
+    from moneytool.diagnose import build_report  # noqa: PLC0415
+    from moneytool.logging import setup_logging  # noqa: PLC0415
 
-    ctx = build_context(data_dir, log_to_file=False)
-    ok = True
-    try:
-        report: dict[str, Any] = {
-            "data_dir": str(ctx.settings.data_dir),
-            "db": str(ctx.settings.db_path),
-            "db_size_mb": round(ctx.settings.db_path.stat().st_size / 1e6, 2)
-            if ctx.settings.db_path.exists()
-            else 0,
-            "params": [p.version for p in list_versions(ctx.params_dir)],
-            "now": now_sh().isoformat(),
-        }
-        with ctx.db.read() as conn:
-            report["tables"] = int(
-                conn.execute(
-                    "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'main'"
-                ).fetchone()[0]  # type: ignore[index]
-            )
-        holder = read_holder(ctx.settings.lock_path)
-        report["lock_holder"] = holder or None
-        drift = clock_drift_seconds(ctx.adapters)
-        report["clock_drift_seconds"] = drift
-        if drift is not None and abs(drift) > ctx.settings.schedule.clock_drift_warn_seconds:
-            report["clock_warning"] = "本机时钟与数据源偏差过大，分段时点可能错位"
-            ok = False
-        health = ctx.adapters.health()
-        report["sources"] = health
-        if any(not h.get("ok") for h in health):
-            ok = False
-        report["result"] = "ok" if ok else "warn"
-        _echo_json(report)
-    finally:
-        ctx.close()
+    setup_logging(None, level="WARNING")
+    settings = load_settings(data_dir)
+    text, ok = build_report(settings, log_lines=log_lines, check_sources=not offline)
+    typer.echo(text)
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        # utf-8-sig：Windows 记事本可正确识别中文
+        out.write_text(text, encoding="utf-8-sig")
+        typer.echo(f"报告已保存: {out.resolve()}")
     raise typer.Exit(code=0 if ok else 1)
 
 

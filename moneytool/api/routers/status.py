@@ -129,3 +129,11 @@ def admin_recompute(body: RecomputeRequest, request: Request) -> Envelope:
         meta=Meta(trade_date=body.trade_date, segment=body.segment, status=DataStatus.CONFIRMED),
         data={"stage_rows": out},
     )
+
+
+@router.get("/diagnose", response_model=Envelope)
+def diagnose(conn: duckdb.DuckDBPyConnection = Depends(get_ro_conn)) -> Envelope:
+    """`moneytool doctor` 在主程序运行时（库被独占）通过这里取数据库部分。"""
+    from moneytool.diagnose import db_summary  # noqa: PLC0415
+
+    return Envelope(meta=Meta(trade_date=None, status=DataStatus.CONFIRMED), data=db_summary(conn))
