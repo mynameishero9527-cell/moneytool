@@ -20,6 +20,9 @@ INTRADAY_TABLES: tuple[tuple[str, str], ...] = (
     ("hint", "segment <> 'close'"),
     ("stock_profile", "segment <> 'close'"),
     ("market_daily", "segment <> 'close'"),
+    ("sector_horizon", "segment <> 'close'"),
+    ("sector_trend", "segment <> 'close'"),
+    ("flow_signal", "segment <> 'close'"),
 )
 
 

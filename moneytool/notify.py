@@ -1,7 +1,8 @@
 """需求 9.6 提醒：事件收集 → 去重 → 分组合并 → 频次上限 → 静默 → 推送（Webhook）。
 
 事件仅限：风控开关开启 / 关闭；自选板块确认阶段迁移；自选股新进入买入关注 / 卖出关注；自选股强势失效；
-跟踪中的股票命中卖出关注。竞价段不触发；盘中事件标「盘中」，收盘时未被确认的补发「已撤销」。
+跟踪中的股票命中卖出关注；板块资金动向（资金异动、趋势倾向转向、多周期共振），自选板块全部推送，
+其余只推每类前 3 名一级行业。竞价段不触发；盘中事件标「盘中」，收盘时未被确认的补发「已撤销」。
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import duckdb
 import httpx
 
 from moneytool.compute.hints import stage_zh
+from moneytool.compute.horizons import SIGNAL_ZH
 from moneytool.config import NotifyConfig
 from moneytool.logging import get_logger
 from moneytool.types import FORBIDDEN_WORDS, Segment
@@ -32,7 +34,9 @@ EVENT_ZH = {
     "watch_sell_new": "新进入卖出关注",
     "watch_strong_invalid": "强势失效",
     "tracking_sell": "跟踪中命中卖出关注",
+    **{f"flow_{k}": v for k, v in SIGNAL_ZH.items()},
 }
+FLOW_TOP_L1 = 3
 
 
 @dataclass
@@ -157,7 +161,34 @@ def collect_events(
                 else "市场风控关闭"
             )
             events.append(Event("market", "gate_on" if on else "gate_off", text))
+    events += _flow_events(conn, day, segment, version, watch, suffix)
     return events
+
+
+def _flow_events(
+    conn: duckdb.DuckDBPyConnection,
+    day: dt.date,
+    segment: str | None,
+    version: str,
+    watch: set[str],
+    suffix: str,
+) -> list[Event]:
+    """资金动向信号：自选板块全部推送；其余只推每类信号强度前几名的一级行业。"""
+    rows = conn.execute(
+        "SELECT sector_id, kind, score, text, json_extract_string(payload, '$.level') FROM flow_signal "
+        "WHERE trade_date = ? AND segment = ? AND param_version = ? ORDER BY kind, abs(score) DESC",
+        [day, segment or "close", version],
+    ).fetchall()
+    taken: dict[str, int] = {}
+    out: list[Event] = []
+    for raw_id, kind, score, text, level in rows:
+        sid = str(raw_id)
+        if sid not in watch:
+            if level != "L1" or taken.get(kind, 0) >= FLOW_TOP_L1:
+                continue
+            taken[kind] = taken.get(kind, 0) + 1
+        out.append(Event(sid, f"flow_{kind}", f"{text}{suffix}", payload={"score": score}))
+    return out
 
 
 def _group(events: list[Event]) -> list[Event]:

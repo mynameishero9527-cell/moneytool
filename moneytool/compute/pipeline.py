@@ -16,6 +16,7 @@ import polars as pl
 
 from moneytool.compute.chain import run_chain
 from moneytool.compute.features import compute_stock_features
+from moneytool.compute.horizons import compute_horizons
 from moneytool.compute.market import (
     ACTIVE_STAGES,
     compute_market_daily,
@@ -395,6 +396,7 @@ def run(
     # ⑧ 存档
     stage_table = "sector_stage_intraday" if intraday else "sector_stage_confirmed"
     upsert(conn, stage_table, stages)
+    _persist_horizons(conn, p, day, segment, sector_feat, market, sector_meta, result)
     upsert(
         conn, "feature_daily", _features_json(stock_feat, "code", "stock", day, p.version, segment)
     )
@@ -457,6 +459,33 @@ def run(
         regime=regime.value,
     )
     return result
+
+
+def _persist_horizons(
+    conn: duckdb.DuckDBPyConnection,
+    p: Params,
+    day: dt.date,
+    segment: str | None,
+    sector_feat: pl.DataFrame,
+    market: pl.DataFrame,
+    sector_meta: pl.DataFrame,
+    result: PipelineResult,
+) -> None:
+    names = dict(
+        zip(sector_meta["sector_id"].to_list(), sector_meta["name"].to_list(), strict=True)
+    )
+    hz = compute_horizons(sector_feat, market, p, day, intraday=segment is not None, names=names)
+    tag = [pl.lit(segment or "close").alias("segment"), pl.lit(p.version).alias("param_version")]
+    upsert(conn, "sector_horizon", hz.horizons.with_columns(tag))
+    upsert(conn, "sector_trend", hz.trends.with_columns(tag))
+    conn.execute(
+        "DELETE FROM flow_signal WHERE trade_date = ? AND segment = ? AND param_version = ?",
+        [day, segment or "close", p.version],
+    )
+    upsert(conn, "flow_signal", hz.signals.with_columns(tag))
+    if segment is None:
+        upsert(conn, "trend_backtest", hz.backtest.with_columns(param_version=pl.lit(p.version)))
+    result.chain_counts["horizon_signals"] = hz.signals.height
 
 
 def _persist_market_only(

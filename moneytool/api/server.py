@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from moneytool import __version__
-from moneytool.api.routers import actions, market, review, sectors, status, stocks
+from moneytool.api.routers import actions, flow, market, review, sectors, status, stocks
 from moneytool.params import builtin_params_dir
 from moneytool.storage.conn import Database
 
@@ -85,6 +85,7 @@ def create_app(
     app.include_router(stocks.router, prefix=api_prefix)
     app.include_router(actions.router, prefix=api_prefix)
     app.include_router(review.router, prefix=api_prefix)
+    app.include_router(flow.router, prefix=api_prefix)
 
     if static_dir is not None and (static_dir / "index.html").exists():
         assets = static_dir / "assets"
