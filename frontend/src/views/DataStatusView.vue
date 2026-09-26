@@ -48,7 +48,7 @@ const progress = (task: string) => {
       <div class="section-title">回补进度</div>
       <div class="grid grid-2">
         <div v-for="task in ['bars', 'flow_daily']" :key="task" class="card">
-          <b>{{ task === "bars" ? "日线（5 年）" : "日频资金流（2 年）" }}</b>
+          <b>{{ task === "bars" ? "日线（5 年）" : "日频资金流（近 120 个交易日）" }}</b>
           <div class="bar"><span :style="{ width: progress(task).ratio * 100 + '%' }" /></div>
           <div class="muted">完成 {{ progress(task).done }} / {{ progress(task).total }} · 待补 {{ progress(task).pending }} · 失败 {{ progress(task).failed }} · 日线 {{ s.counts["bar_days"] }} 日 · 资金 {{ s.counts["flow_days"] }} 日</div>
         </div>
