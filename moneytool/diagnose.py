@@ -318,8 +318,12 @@ def build_report(
             total = p.get("total", 0)
             done = p.get("done", 0)
             failed = p.get("failed", 0)
+            partial = p.get("partial", 0)
             ratio = f"{done / total:.0%}" if total else "—"
-            out.append(f"{label}: 完成 {done}/{total}（{ratio}）· 失败 {failed}")
+            line = f"{label}: 完成 {done}/{total}（{ratio}）· 失败 {failed}"
+            if partial:
+                line += f" · 近期已补、更早历史补充中 {partial}"
+            out.append(line)
             if total and failed > total * 0.05:
                 problems.append(f"{label}回补失败 {failed} 只，超过 5%：多为数据源限流或连不上")
 

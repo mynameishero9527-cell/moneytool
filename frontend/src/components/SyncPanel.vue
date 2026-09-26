@@ -7,16 +7,23 @@ import SyncBar from "./SyncBar.vue";
 const { sync, query } = useSync();
 const STEPS = [
   { key: "reference", label: "参考数据" },
-  { key: "backfill", label: "历史回补" },
+  { key: "backfill", label: "补近期历史" },
   { key: "catchup", label: "计算结果" },
-  { key: "ready", label: "就绪" },
+  { key: "deepening", label: "可使用 · 补更早历史" },
+  { key: "ready", label: "全部完成" },
 ];
-const ORDER: Record<string, number> = { starting: 0, reference: 0, backfill: 1, catchup: 2, ready: 3 };
-const current = computed(() => ORDER[sync.value?.stage ?? ""] ?? -1);
+const ORDER: Record<string, number> = { starting: 0, reference: 0, backfill: 1, catchup: 2, deepening: 3, ready: 4 };
+const current = computed(() => {
+  const s = sync.value;
+  if (!s) return -1;
+  // 可用之后的补算（补深一层后重算近期）不退回到「计算结果」一步
+  if (s.stage === "catchup" && s.usable) return 3;
+  return ORDER[s.stage] ?? -1;
+});
 const lanes = computed(() =>
   sync.value
     ? [
-        { key: "bars", hint: "Baostock · 5 年日线与复权因子", lane: sync.value.lanes.bars },
+        { key: "bars", hint: "Baostock · 日线与复权因子，由近及远分层补：第一层补完即开始计算", lane: sync.value.lanes.bars },
         { key: "flow", hint: "新浪财经 · 日频资金流", lane: sync.value.lanes.flow },
       ]
     : [],
@@ -54,6 +61,13 @@ const stateClass = (lane: SyncLane) =>
           <span class="pct">{{ item.lane.percent.toFixed(1) }}%</span>
         </div>
         <SyncBar :lane="item.lane" />
+        <div v-if="item.lane.tiers?.length" class="tiers">
+          <span v-for="t in item.lane.tiers" :key="t.key" class="tier" :class="{ done: t.pending === 0 }">
+            <span class="tier-name">{{ t.pending === 0 ? "✓ " : "" }}{{ t.label }}</span>
+            <span class="tier-bar"><i :style="{ width: t.percent + '%' }" /></span>
+            <span class="tier-pct">{{ t.percent.toFixed(0) }}%</span>
+          </span>
+        </div>
         <div class="nums">
           <span>完成 <b>{{ item.lane.done }}</b> / {{ item.lane.total }}</span>
           <span>待补 {{ item.lane.pending }}</span>
@@ -162,6 +176,39 @@ const stateClass = (lane: SyncLane) =>
 }
 .fail {
   color: #b45309;
+}
+.tiers {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.tier {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--c-text-2);
+}
+.tier.done {
+  color: var(--c-progress-done);
+}
+.tier-bar {
+  width: 70px;
+  height: 5px;
+  border-radius: 3px;
+  background: #e5e7eb;
+  overflow: hidden;
+}
+.tier-bar i {
+  display: block;
+  height: 100%;
+  background: var(--c-progress);
+}
+.tier.done .tier-bar i {
+  background: var(--c-progress-done);
+}
+.tier-pct {
+  font-variant-numeric: tabular-nums;
 }
 .note {
   font-size: 12px;

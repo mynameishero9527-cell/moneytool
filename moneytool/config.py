@@ -93,6 +93,8 @@ class BackfillConfig(BaseModel):
     batch: int = 100  # 每批标的数，每批写库一次
     # 日线（Baostock）回补进程数：Baostock 一个进程只有一个连接，多进程各自登录并发拉取；1 为不开子进程
     bars_workers: int = 3
+    # 日线分层回补（天）：先补近半年、再补近一年，最后补满 backfill_years_bars；只有第一层补完才开始计算
+    bars_tiers_days: list[int] = Field(default_factory=lambda: [183, 365])
     # 个股资金流：多线程共享一个自适应限速器，成功时间隔逐步降到下限，失败翻倍直到上限。
     # 不填时按来源取默认值：新浪 4 线程 / 0.5 秒，东财 1 线程 / 3 秒（东财易封 IP）
     flow_workers: int | None = None
@@ -209,6 +211,7 @@ backfill_years_bars = 5
 [backfill]
 # 日线回补进程数（Baostock 每个进程一个连接，多进程并发）；电脑较慢可改为 1
 bars_workers = 3
+bars_tiers_days = [183, 365]   # 日线分层回补：先近半年、再近一年，最后补满 backfill_years_bars；第一层补完即可使用
 # 个股资金流回补的线程数与最小请求间隔（秒），不填按来源默认：新浪 4 线程 / 0.5 秒，东财 1 线程 / 3 秒。
 # 失败时间隔自动翻倍，连续失败暂停 30 分钟起、逐次翻倍到 4 小时；东财间隔过小会被封 IP
 # flow_workers = 4

@@ -16,14 +16,18 @@ import polars as pl
 from moneytool.adapters.base import AdapterError, AdaptiveLimiter
 from moneytool.app import AppContext, now_sh, today_sh
 from moneytool.compute.labels import compute_labels
-from moneytool.compute.pipeline import PipelineResult, run
+from moneytool.compute.pipeline import HISTORY_DAYS, PipelineResult, run
 from moneytool.ingest.bars import TASK as BARS_TASK
 from moneytool.ingest.bars import (
+    Tier,
     backfill_bars,
+    bars_tiers,
     daily_bars_from_snapshot,
     fetch_bars,
-    pending_codes,
+    reset_tier_failures,
     store_bars,
+    tier_counts,
+    tier_pending,
     update_float_mv,
 )
 from moneytool.ingest.bars_pool import BarsPool
@@ -35,6 +39,7 @@ from moneytool.ingest.flow import (
     confirm_from_snapshot,
     fetch_flow,
     flow_last_dates,
+    note_restated,
     pending_flow_codes,
     rebuild_intraday,
     reconcile_sample,
@@ -73,6 +78,7 @@ FLOW_REFRESH_HOURS = 6
 LANE_POLL_SECONDS = 60
 LANE_IDLE_SECONDS = 600  # 一路没有待办后隔多久再查（资金流每日增量靠它触发）
 CATCHUP_EVERY_SECONDS = 1800  # 同一只股票两次增量尝试的最小间隔，源端未更新时不反复请求
+TIER_DONE_KEY = "bars_tier_done"
 
 
 class JobRunner:
@@ -180,6 +186,7 @@ class JobRunner:
         if stale:
             self.progress.set_stage("reference")
             self.job_reference_sync(day)
+        self.run_job("backfill_tier_retry", reset_tier_failures)
         self.job_catchup()
         self.progress.set_stage("backfill")
 
@@ -521,25 +528,34 @@ class JobRunner:
             flow = None if self.flow_paused() else pool.submit(self._backfill_flow_batch, day, n)
             return bars.result(), (flow.result() if flow else 0)
 
-    def _pending(self, task: str, n: int) -> list[str]:
-        with self.ctx.db.read() as conn:
-            return pending_codes(conn, task)[:n]
+    def bars_tiers(self, day: dt.date) -> list[Tier]:
+        cfg = self.ctx.settings
+        return bars_tiers(day, cfg.backfill.bars_tiers_days, cfg.data.backfill_years_bars)
 
     def _backfill_bars_batch(self, day: dt.date, n: int) -> int:
-        todo = self._pending(BARS_TASK, n)
-        if not todo:
+        """分层回补：先把所有股票补到近半年，再整体往前补到近一年，最后补满配置年数。
+        Baostock 单只耗时随区间长度增长（半年约 1.6 秒、5 年约 6.6 秒），这样第一层很快补完即可开始计算。"""
+        tiers = self.bars_tiers(day)
+        ranges: dict[str, tuple[dt.date, dt.date]] = {}
+        with self.ctx.db.read() as conn:
+            for tier in tiers:
+                ranges = tier_pending(conn, tier.start, day, n)
+                if ranges:
+                    break
+        if not ranges:
             return 0
+        todo = list(ranges)
         lane = self.progress.lanes["bars"]
         lane.begin(len(todo))
-        years = self.ctx.settings.data.backfill_years_bars
-        start = day - dt.timedelta(days=365 * years)
+        start, end = tiers[-1].start, day
         try:
             if self.bars_pool is not None:
                 results = self.bars_pool.fetch(
                     todo,
                     start=start,
-                    end=day,
+                    end=end,
                     day=day,
+                    ranges=ranges,
                     should_stop=self.stop_event.is_set,
                     on_item=lane.tick,
                 )
@@ -548,8 +564,9 @@ class JobRunner:
                     self.ctx.adapters,
                     todo,
                     start=start,
-                    end=day,
+                    end=end,
                     day=day,
+                    ranges=ranges,
                     should_stop=self.stop_event.is_set,
                     on_item=lane.tick,
                 )
@@ -557,9 +574,88 @@ class JobRunner:
             log.error("backfill_fetch_failed", task=BARS_TASK, error=str(exc))
             lane.end()
             return 0
-        out = self.run_job("backfill", lambda conn: store_bars(conn, results, day))
+        out = self.run_job(
+            "backfill",
+            lambda conn: store_bars(conn, results, day, ranges=ranges, full_start=tiers[-1].start),
+        )
         lane.end()
         return out if isinstance(out, int) else 0
+
+    def tiers_done(self, conn: duckdb.DuckDBPyConnection, day: dt.date) -> int:
+        """由近及远已补完的日线层数（没有待拉的股票即算补完，连续失败的暂跳过）。"""
+        n = 0
+        for c in tier_counts(conn, self.bars_tiers(day)):
+            if c["pending"] > 0:
+                break
+            n += 1
+        return n
+
+    def history_ready(self, conn: duckdb.DuckDBPyConnection, day: dt.date) -> bool:
+        """可以开始计算：日线第一层补完，且资金流每只都至少拉过一次（资金流一次请求即返回全部历史）。"""
+        if self.tiers_done(conn, day) < 1:
+            return False
+        row = conn.execute(
+            "SELECT count(*) FROM security s LEFT JOIN backfill_progress p "
+            "ON p.task = ? AND p.subject_id = s.code WHERE NOT s.is_delisting AND p.status IS NULL",
+            [TASK_FLOW],
+        ).fetchone()
+        return row is not None and int(row[0]) == 0
+
+    def _history_start_needed(
+        self, conn: duckdb.DuckDBPyConnection, day: dt.date
+    ) -> dt.date | None:
+        """补算窗口最早一天的计算所需历史起点：再早的数据不影响结果。"""
+        row = conn.execute(
+            "SELECT min(trade_date) FROM (SELECT trade_date FROM trade_calendar WHERE is_open "
+            "AND trade_date < ? ORDER BY trade_date DESC LIMIT ?)",
+            [day, HISTORY_DAYS + self.ctx.settings.schedule.catchup_days],
+        ).fetchone()
+        return None if row is None else row[0]
+
+    def check_tier_progress(self, day: dt.date) -> None:
+        """日线又补完一层时：若之前的结果是在历史不足的情况下算的，标记近期交易日重算，
+        并清掉按旧历史回算的趋势得分（下次收盘计算重新补齐）。"""
+        self.progress.set_bars_tiers(
+            [
+                {"key": t.key, "label": t.label, "start": t.start.isoformat()}
+                for t in self.bars_tiers(day)
+            ]
+        )
+        with self.ctx.db.read() as conn:
+            done = self.tiers_done(conn, day)
+            raw = setting_get(conn, TIER_DONE_KEY)
+            before = int(raw) if raw is not None else 0
+            need_from = self._history_start_needed(conn, day)
+        if done <= before:
+            return
+        tiers = self.bars_tiers(day)
+
+        def work(conn: duckdb.DuckDBPyConnection) -> int:
+            setting_set(conn, TIER_DONE_KEY, str(done))
+            short = before >= 1 and (need_from is None or tiers[before - 1].start > need_from)
+            if not short:
+                return 0
+            days = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT DISTINCT trade_date FROM market_daily WHERE segment = 'close'"
+                ).fetchall()
+            } & self.catchup_days_window(conn, day)
+            if days:
+                note_restated(conn, days)
+                conn.execute("DELETE FROM sector_trend WHERE segment = 'close' AND reasons IS NULL")
+            log.info("bars_tier_done", tier=tiers[done - 1].label, restated=len(days))
+            return len(days)
+
+        self.run_job("backfill_tier_done", work)
+
+    def catchup_days_window(self, conn: duckdb.DuckDBPyConnection, day: dt.date) -> set[dt.date]:
+        rows = conn.execute(
+            "SELECT trade_date FROM trade_calendar WHERE is_open AND trade_date < ? "
+            "ORDER BY trade_date DESC LIMIT ?",
+            [day, self.ctx.settings.schedule.catchup_days],
+        ).fetchall()
+        return {r[0] for r in rows}
 
     def _flow_target(self, conn: duckdb.DuckDBPyConnection) -> dt.date | None:
         """新浪来源每日增量要补到的交易日：收盘数据约 18 点后才齐，之前以上一交易日为准。"""
@@ -642,19 +738,28 @@ class JobRunner:
             t.start()
         last_catchup: float | None = None
         while not self.stop_event.is_set():
+            day = today_sh()
+            try:
+                self.check_tier_progress(day)
+                with self.ctx.db.read() as conn:
+                    ready = self.history_ready(conn, day)
+            except Exception as exc:
+                log.error("backfill_ready_check_failed", error=str(exc))
+                ready = False
+            self.progress.set_usable(ready)
             idle = all(lane.idle.is_set() for lane in lanes.values())
-            if idle and not self.flow_paused():
+            if ready and not self.flow_paused():
                 progressed = sum(lane.take_progress() for lane in lanes.values()) > 0
                 due = (
                     last_catchup is None or time.monotonic() - last_catchup >= CATCHUP_EVERY_SECONDS
                 )
+                # 近期历史够用就开始算，不等更早的日线补完；catchup_days 只挑覆盖足够、尚无结果或需重算的日子
                 if progressed or due:
-                    log.info("backfill_idle")
                     self._concepts_if_empty()
                     self.job_catchup()
                     last_catchup = time.monotonic()
-                self.progress.set_stage("ready")
-            elif self.progress.stage == "ready":
+                self.progress.set_stage("ready" if idle else "deepening")
+            elif self.progress.stage in ("ready", "deepening"):
                 self.progress.set_stage("backfill")
             reporter.maybe_print()
             self.stop_event.wait(LANE_POLL_SECONDS)

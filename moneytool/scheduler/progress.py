@@ -17,6 +17,7 @@ STAGE_LABEL = {
     "reference": "同步参考数据",
     "backfill": "回补历史数据",
     "catchup": "计算历史结果",
+    "deepening": "已可使用 · 后台补更早历史",
     "ready": "已就绪",
     "disabled": "未运行回补（--no-scheduler）",
 }
@@ -105,7 +106,18 @@ class SyncProgress:
         self.stage = "starting"
         self.catchup_total = 0
         self.catchup_done = 0
+        self.usable = False
+        self.bars_tiers: list[dict[str, str]] = []
         self.lanes = {name: LaneProgress(name, clock) for name in LANE_TASK}
+
+    def set_usable(self, usable: bool) -> None:
+        with self._lock:
+            self.usable = usable
+
+    def set_bars_tiers(self, tiers: list[dict[str, str]]) -> None:
+        """日线分层定义（key / label / start），供概览按层统计。"""
+        with self._lock:
+            self.bars_tiers = tiers
 
     def set_stage(self, stage: str) -> None:
         with self._lock:
@@ -127,8 +139,11 @@ class SyncProgress:
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             stage, total, done = self.stage, self.catchup_total, self.catchup_done
+            usable, tiers = self.usable, list(self.bars_tiers)
         return {
             "stage": stage,
+            "usable": usable,
+            "bars_tiers": tiers,
             "catchup": {"total": total, "done": done},
             "lanes": {name: lane.snapshot() for name, lane in self.lanes.items()},
         }
@@ -156,18 +171,34 @@ def task_counts(conn: duckdb.DuckDBPyConnection) -> dict[str, dict[str, int]]:
     return out
 
 
+def _tier_rows(conn: duckdb.DuckDBPyConnection, defs: list[dict[str, str]]) -> list[dict[str, Any]]:
+    from moneytool.ingest.bars import Tier, tier_counts  # noqa: PLC0415
+
+    tiers = [Tier(d["key"], d["label"], dt.date.fromisoformat(d["start"])) for d in defs]
+    return tier_counts(conn, tiers)
+
+
 def sync_overview(conn: duckdb.DuckDBPyConnection, live: dict[str, Any] | None) -> dict[str, Any]:
-    """合并库里的完成数与内存里的实时状态；`live` 为 None 表示本进程没跑回补（如 --no-scheduler）。"""
+    """合并库里的完成数与内存里的实时状态；`live` 为 None 表示本进程没跑回补（如 --no-scheduler）。
+    日线分层回补时，日线一路的进度按当前层统计，各层完成情况另列在 `tiers`。"""
     counts = task_counts(conn)
+    tiers = _tier_rows(conn, (live or {}).get("bars_tiers") or [])
+    current = next((t for t in tiers if t["pending"] > 0), None)
     lanes: dict[str, Any] = {}
     for name, task in LANE_TASK.items():
-        c = counts[task]
+        c = dict(counts[task])
+        label = LANE_LABEL[name]
+        if name == "bars" and tiers:
+            layer = current or tiers[-1]
+            c = {k: layer[k] for k in ("total", "done", "failed", "pending")}
+            label = f"{label} · {layer['label']}"
         lv = (live or {}).get("lanes", {}).get(name, {})
-        remaining = c["total"] - c["done"]
+        # 分层时连续失败的股票暂跳过（启动时重试），不计入剩余；资金流失败的会在后续批次重试
+        remaining = c["pending"] if name == "bars" and tiers else c["total"] - c["done"]
         rate = lv.get("rate_per_min")
         eta = int(remaining / rate * 60) if rate and remaining > 0 else None
         lanes[name] = {
-            "label": LANE_LABEL[name],
+            "label": label,
             **c,
             "percent": round(c["done"] / c["total"] * 100, 1) if c["total"] else 0.0,
             "state": lv.get("state", "unknown"),
@@ -178,13 +209,20 @@ def sync_overview(conn: duckdb.DuckDBPyConnection, live: dict[str, Any] | None) 
             "rate_per_min": rate,
             "eta_seconds": eta,
         }
+    if tiers:
+        for t in tiers:
+            t["percent"] = round(t["done"] / t["total"] * 100, 1) if t["total"] else 0.0
+        lanes["bars"]["tiers"] = tiers
     stage = (live or {}).get("stage", "unknown")
-    complete = all(v["done"] >= v["total"] > 0 for v in lanes.values())
+    complete = all(v["done"] + v["failed"] >= v["total"] > 0 for v in lanes.values()) and (
+        current is None
+    )
     etas = [v["eta_seconds"] for v in lanes.values() if v["eta_seconds"] is not None]
     return {
         "live": live is not None,
         "stage": stage,
         "stage_label": STAGE_LABEL.get(stage, "未知"),
+        "usable": bool((live or {}).get("usable")) or stage == "ready",
         "complete": complete and stage in ("ready", "unknown"),
         "eta_seconds": max(etas) if etas else None,
         "catchup": (live or {}).get("catchup", {"total": 0, "done": 0}),

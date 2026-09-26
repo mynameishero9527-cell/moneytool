@@ -16,14 +16,15 @@ const summary = computed(() => {
   const s = sync.value;
   if (!s) return "";
   if (s.stage === "catchup") return `计算历史结果 ${s.catchup.done}/${s.catchup.total} 天`;
+  if (s.usable) return "近期数据已齐，页面可正常使用；更早的日线在后台继续补";
   if (s.stage === "reference" || s.stage === "starting") return s.stage_label;
   return s.eta_seconds != null ? `预计剩余 ${formatDuration(s.eta_seconds)}` : "剩余时间估算中";
 });
 </script>
 
 <template>
-  <router-link v-if="visible && sync" class="sync-banner" :to="{ name: 'status' }" title="查看同步详情">
-    <span class="title">数据同步中</span>
+  <router-link v-if="visible && sync" class="sync-banner" :class="{ usable: sync.usable }" :to="{ name: 'status' }" title="查看同步详情">
+    <span class="title">{{ sync.usable ? "已可使用" : "数据同步中" }}</span>
     <span v-for="lane in lanes" :key="lane.label" class="lane">
       <span class="name">{{ lane.label }}</span>
       <SyncBar :lane="lane" slim class="bar" />
@@ -49,6 +50,10 @@ const summary = computed(() => {
 }
 .sync-banner:hover {
   background: #dbeafe;
+}
+.sync-banner.usable {
+  background: #f8fafc;
+  border-bottom-color: var(--c-border);
 }
 .title {
   font-weight: 600;

@@ -22,6 +22,7 @@ from moneytool.adapters.base import (
 from moneytool.adapters.eastmoney import EastmoneyAdapter
 from moneytool.app import build_context, init_data_dir
 from moneytool.config import SourceRateLimit
+from moneytool.ingest.bars import mark_progress
 from moneytool.scheduler import jobs
 from moneytool.scheduler.jobs import JobRunner
 
@@ -80,6 +81,18 @@ def test_lanes_do_not_wait_for_each_other(
 ) -> None:
     init_data_dir(tmp_data_dir)
     ctx = build_context(tmp_data_dir, log_to_file=False)
+    codes = ["000001.SZ", "000002.SZ"]
+    with ctx.db.write() as conn:
+        for c in codes:
+            conn.execute(
+                "INSERT INTO security (code, name, exchange, board, is_st, is_delisting) "
+                "VALUES (?, ?, 'SZ', '主板', FALSE, FALSE)",
+                [c, c],
+            )
+            conn.execute(
+                "INSERT INTO backfill_tier (task, subject_id, covered_from) VALUES ('bars', ?, DATE '1900-01-01')",
+                [c],
+            )
     runner = JobRunner(ctx)
     monkeypatch.setattr(jobs, "LANE_POLL_SECONDS", 0.05)
     monkeypatch.setattr(jobs, "LANE_IDLE_SECONDS", 0.05)
@@ -96,6 +109,9 @@ def test_lanes_do_not_wait_for_each_other(
         flow_calls.append(n)
         if len(flow_calls) == 1:
             release.wait(10)  # 模拟资金流一批很慢
+            with ctx.db.write() as conn:
+                for c in codes:
+                    mark_progress(conn, "flow_daily", c, "done")
             return 1
         return 0
 

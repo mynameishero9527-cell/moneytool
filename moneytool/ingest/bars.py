@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 import duckdb
 import polars as pl
@@ -92,6 +94,101 @@ def mark_progress(
     )
 
 
+# 复权因子每次都从上市起取：只取分层区间内的除权事件时，区间前累计的后复权因子会丢失
+ADJ_FROM = dt.date(1990, 1, 1)
+LEGACY_FULL = dt.date(1900, 1, 1)
+MAX_TIER_FAILURES = 3
+
+Ranges = dict[str, tuple[dt.date, dt.date]]
+
+
+@dataclass(frozen=True)
+class Tier:
+    key: str
+    label: str
+    start: dt.date
+
+
+def tier_label(days: int) -> str:
+    if days % 365 == 0:
+        return f"近 {days // 365} 年"
+    if 175 <= days <= 190:
+        return "近半年"
+    return f"近 {days} 天"
+
+
+def bars_tiers(day: dt.date, tiers_days: list[int], years: int) -> list[Tier]:
+    """日线回补分层（由近及远），最后一层为配置的全部年数。"""
+    full = 365 * years
+    days = [*sorted({d for d in tiers_days if 0 < d < full}), full]
+    return [Tier(f"{d}d", tier_label(d), day - dt.timedelta(days=d)) for d in days]
+
+
+_COVERED = (
+    "(t.covered_from IS NOT NULL AND (t.covered_from <= ? "
+    "OR (s.list_date IS NOT NULL AND s.list_date >= t.covered_from)))"
+)
+
+
+def tier_pending(
+    conn: duckdb.DuckDBPyConnection, tier_start: dt.date, day: dt.date, limit: int
+) -> Ranges:
+    """本层还没覆盖的股票及各自要拉的区间：没拉过的拉 [层起点, 今天]，拉过更近一层的只补 [层起点, 已覆盖起点)。
+    连续失败达到上限的先跳过（启动时清零重试），免得个别股票卡住整层。"""
+    rows = conn.execute(
+        f"""
+        SELECT s.code, t.covered_from FROM security s
+        LEFT JOIN backfill_tier t ON t.task = ? AND t.subject_id = s.code
+        WHERE NOT s.is_delisting AND NOT {_COVERED} IS TRUE
+          AND COALESCE(t.failures, 0) < ?
+        ORDER BY COALESCE(t.failures, 0), t.covered_from IS NOT NULL, s.code
+        LIMIT ?
+        """,
+        [TASK, tier_start, MAX_TIER_FAILURES, limit],
+    ).fetchall()
+    return {
+        str(code): (tier_start, (cov - dt.timedelta(days=1)) if cov is not None else day)
+        for code, cov in rows
+    }
+
+
+def tier_counts(conn: duckdb.DuckDBPyConnection, tiers: list[Tier]) -> list[dict[str, Any]]:
+    """每层：total 在市证券数、done 已覆盖、failed 连续失败达上限暂跳过、pending 待拉。"""
+    total_row = conn.execute("SELECT count(*) FROM security WHERE NOT is_delisting").fetchone()
+    total = int(total_row[0]) if total_row else 0
+    out: list[dict[str, Any]] = []
+    for t in tiers:
+        row = conn.execute(
+            f"""
+            SELECT count(*) FILTER (WHERE {_COVERED}),
+                   count(*) FILTER (WHERE NOT {_COVERED} IS TRUE AND t.failures >= ?)
+            FROM security s JOIN backfill_tier t ON t.task = ? AND t.subject_id = s.code
+            WHERE NOT s.is_delisting
+            """,
+            [t.start, t.start, MAX_TIER_FAILURES, TASK],
+        ).fetchone()
+        done, failed = (int(row[0]), int(row[1])) if row else (0, 0)
+        out.append(
+            {
+                "key": t.key,
+                "label": t.label,
+                "start": t.start.isoformat(),
+                "total": total,
+                "done": done,
+                "failed": failed,
+                "pending": max(0, total - done - failed),
+            }
+        )
+    return out
+
+
+def reset_tier_failures(conn: duckdb.DuckDBPyConnection) -> int:
+    row = conn.execute(
+        "UPDATE backfill_tier SET failures = 0 WHERE task = ? AND failures > 0", [TASK]
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def backfill_bars(
     conn: duckdb.DuckDBPyConnection,
     ad: Adapters,
@@ -107,9 +204,9 @@ def backfill_bars(
     todo = codes if codes is not None else pending_codes(conn, TASK)
     if limit is not None:
         todo = todo[:limit]
-    return store_bars(
-        conn, fetch_bars(ad, todo, start=start, end=end, day=day, should_stop=should_stop), day
-    )
+    ranges = {c: (start, end) for c in todo}
+    results = fetch_bars(ad, todo, start=start, end=end, day=day, should_stop=should_stop)
+    return store_bars(conn, results, day, ranges=ranges, full_start=start)
 
 
 BarsResult = tuple[str, tuple[pl.DataFrame, pl.DataFrame] | AdapterError]
@@ -122,18 +219,21 @@ def fetch_bars(
     start: dt.date,
     end: dt.date,
     day: dt.date,
+    ranges: Ranges | None = None,
     should_stop: Callable[[], bool] | None = None,
     on_item: Callable[[str], None] | None = None,
 ) -> list[BarsResult]:
     """只拉数据不写库（可在写锁外执行）。Baostock 会话不支持并发，逐只顺序拉。
+    `ranges` 给出各股自己的区间（分层回补），缺省用 [start, end]。
     每拉完一只（成功或失败）调用 `on_item(code)`，供进度显示。"""
     out: list[BarsResult] = []
     for code in codes:
         if should_stop and should_stop():
             break
+        a, b = (ranges or {}).get(code, (start, end))
         try:
-            k = ad.baostock.kdata(code, start, end, day)
-            adj = ad.baostock.adjust_factor(code, start, end, day)
+            k = ad.baostock.kdata(code, a, b, day)
+            adj = ad.baostock.adjust_factor(code, ADJ_FROM, day, day)
             out.append((code, (k, adj)))
         except AdapterError as exc:
             out.append((code, exc))
@@ -142,9 +242,39 @@ def fetch_bars(
     return out
 
 
-def store_bars(conn: duckdb.DuckDBPyConnection, results: list[BarsResult], day: dt.date) -> int:
+def _mark_tier(
+    conn: duckdb.DuckDBPyConnection, code: str, covered_from: dt.date | None, failed: bool
+) -> dt.date | None:
+    """更新覆盖起点（取更早者）与连续失败次数，返回更新后的覆盖起点。"""
+    row = conn.execute(
+        "SELECT covered_from, failures FROM backfill_tier WHERE task = ? AND subject_id = ?",
+        [TASK, code],
+    ).fetchone()
+    old_cov, old_fail = (row[0], int(row[1])) if row else (None, 0)
+    cov = old_cov
+    if not failed and covered_from is not None:
+        cov = covered_from if old_cov is None else min(old_cov, covered_from)
+    conn.execute(
+        "INSERT OR REPLACE INTO backfill_tier (task, subject_id, covered_from, failures, updated_at) "
+        "VALUES (?, ?, ?, ?, now())",
+        [TASK, code, cov, old_fail + 1 if failed else 0],
+    )
+    return cov
+
+
+def store_bars(
+    conn: duckdb.DuckDBPyConnection,
+    results: list[BarsResult],
+    day: dt.date,
+    *,
+    ranges: Ranges | None = None,
+    full_start: dt.date | None = None,
+) -> int:
+    """写日线并记进度。`ranges` 为各股本次拉取的区间；覆盖起点早于 `full_start`（最后一层起点）
+    即记为 done，否则为 partial（近期已有、更早的还在补）。"""
     done = 0
     for code, res in results:
+        rng = (ranges or {}).get(code)
         if isinstance(res, AdapterError):
             record_quality(
                 conn,
@@ -154,15 +284,27 @@ def store_bars(conn: duckdb.DuckDBPyConnection, results: list[BarsResult], day: 
                 status=QualityStatus.MISSING,
                 reason=str(res),
             )
+            _mark_tier(conn, code, None, failed=True)
             mark_progress(conn, TASK, code, "failed")
             continue
+        cov = _mark_tier(conn, code, rng[0] if rng else None, failed=False)
+        status = (
+            "done" if full_start is None or (cov is not None and cov <= full_start) else "partial"
+        )
         k, adj = res
         if k.is_empty():
-            mark_progress(conn, TASK, code, "done", None)
+            mark_progress(conn, TASK, code, status, None)
             continue
         bars = bars_with_adjust(k, adj)
         upsert(conn, "bar_daily", bars)
-        mark_progress(conn, TASK, code, "done", bars["trade_date"].max())  # type: ignore[arg-type]
+        # 补更早一层时区间不含近期，最后日期沿用已有值
+        newest: dt.date = bars["trade_date"].max()  # type: ignore[assignment]
+        prev = conn.execute(
+            "SELECT last_date FROM backfill_progress WHERE task = ? AND subject_id = ?",
+            [TASK, code],
+        ).fetchone()
+        last = newest if prev is None or prev[0] is None or newest > prev[0] else None
+        mark_progress(conn, TASK, code, status, last)
         done += 1
     return done
 

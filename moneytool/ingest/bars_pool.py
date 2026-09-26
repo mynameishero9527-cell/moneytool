@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from moneytool.adapters.base import AdapterError
-from moneytool.ingest.bars import BarsResult
+from moneytool.ingest.bars import ADJ_FROM, BarsResult, Ranges
 from moneytool.logging import get_logger
 
 log = get_logger(__name__)
@@ -38,7 +38,7 @@ def _init_worker(data_dir: str) -> None:
 def _fetch_one(code: str, start: dt.date, end: dt.date, day: dt.date) -> BarsResult:
     try:
         k = _worker_adapter.kdata(code, start, end, day)
-        adj = _worker_adapter.adjust_factor(code, start, end, day)
+        adj = _worker_adapter.adjust_factor(code, ADJ_FROM, day, day)
     except AdapterError as exc:
         return code, exc
     except Exception as exc:  # 子进程里的意外错误也按单只失败处理，不拖垮整批
@@ -72,10 +72,12 @@ class BarsPool:
         start: dt.date,
         end: dt.date,
         day: dt.date,
+        ranges: Ranges | None = None,
         should_stop: Callable[[], bool] | None = None,
         on_item: Callable[[str], None] | None = None,
     ) -> list[BarsResult]:
-        """并发拉一批；同时在途的任务数等于进程数，停止时不再提交新任务。"""
+        """并发拉一批；同时在途的任务数等于进程数，停止时不再提交新任务。
+        `ranges` 给出各股自己的区间（分层回补），缺省用 [start, end]。"""
         pool = self._ensure()
         out: list[BarsResult] = []
         todo = list(codes)
@@ -83,15 +85,17 @@ class BarsPool:
         try:
             while todo or running:
                 while todo and len(running) < self.workers and not (should_stop and should_stop()):
-                    running.add(pool.submit(_fetch_one, todo.pop(0), start, end, day))
+                    code = todo.pop(0)
+                    a, b = (ranges or {}).get(code, (start, end))
+                    running.add(pool.submit(_fetch_one, code, a, b, day))
                 if not running:
                     break
                 finished, running = wait(running, timeout=5, return_when=FIRST_COMPLETED)
                 for fut in finished:
-                    code, res = fut.result()
-                    out.append((code, res))
+                    done_code, res = fut.result()
+                    out.append((done_code, res))
                     if on_item:
-                        on_item(code)
+                        on_item(done_code)
         except (
             Exception
         ) as exc:  # 子进程崩溃（BrokenProcessPool 等）：重建进程池，本批未完成的留给下一批

@@ -46,12 +46,25 @@ export interface SyncLane {
   batch_done: number;
   rate_per_min: number | null;
   eta_seconds: number | null;
+  tiers?: SyncTier[];
+}
+
+export interface SyncTier {
+  key: string;
+  label: string;
+  start: string;
+  total: number;
+  done: number;
+  failed: number;
+  pending: number;
+  percent: number;
 }
 
 export interface SyncData {
   live: boolean;
-  stage: "starting" | "reference" | "backfill" | "catchup" | "ready" | "disabled" | "unknown";
+  stage: "starting" | "reference" | "backfill" | "catchup" | "deepening" | "ready" | "disabled" | "unknown";
   stage_label: string;
+  usable: boolean;
   complete: boolean;
   eta_seconds: number | null;
   catchup: { total: number; done: number };
