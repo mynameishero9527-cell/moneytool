@@ -4,6 +4,8 @@
   （注册表）；这里在进程启动时按 `[network] proxy` 统一设置。
 - 请求头：东方财富接口不带 Referer 时直接断开连接（RemoteDisconnected），而 AkShare 只发 User-Agent，
   这里给所有发往 eastmoney.com 的 requests 请求补上浏览器请求头。
+- 超时：AkShare 多数接口调用 requests 时不传 timeout，连接卡住会永远等下去（曾卡死启动时的参考数据同步），
+  这里给没传 timeout 的请求补上默认值（连接 / 读取秒数）。
 """
 
 from __future__ import annotations
@@ -28,6 +30,8 @@ SOURCE_DOMAINS = (
     "joinquant.com",
 )
 
+DEFAULT_TIMEOUT = (10.0, 30.0)
+
 BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -44,7 +48,8 @@ def eastmoney_headers(host: str) -> dict[str, str]:
 
 
 def install_request_headers() -> None:
-    """包装 `requests.Session.request`：发往 eastmoney.com 的请求缺哪个头补哪个，已有的不动。可重复调用。"""
+    """包装 `requests.Session.request`：发往 eastmoney.com 的请求缺哪个头补哪个，已有的不动；
+    未指定超时的请求一律补默认超时。可重复调用。"""
     if getattr(requests.Session.request, "_moneytool_headers", False):
         return
     original = requests.Session.request
@@ -58,6 +63,10 @@ def install_request_headers() -> None:
                 if k.lower() not in present:
                     headers[k] = v
             kwargs["headers"] = headers
+        if (
+            kwargs.get("timeout") is None and len(args) < 7
+        ):  # method、url 之后第 7 个位置参数是 timeout
+            kwargs["timeout"] = DEFAULT_TIMEOUT
         return original(self, method, url, *args, **kwargs)
 
     request._moneytool_headers = True  # type: ignore[attr-defined]

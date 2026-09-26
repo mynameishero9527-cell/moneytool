@@ -31,3 +31,22 @@ def test_eastmoney_requests_get_referer(monkeypatch: pytest.MonkeyPatch) -> None
     assert sent[1]["Referer"] == "https://quote.eastmoney.com/"
     assert sent[1]["User-Agent"] == BROWSER_UA
     assert "Referer" not in sent[2]
+
+
+def test_requests_without_timeout_get_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from moneytool.network import DEFAULT_TIMEOUT
+
+    timeouts: list[Any] = []
+
+    def fake_send(self: requests.Session, req: requests.PreparedRequest, **kw: Any) -> Any:
+        timeouts.append(kw.get("timeout"))
+        resp = requests.Response()
+        resp.status_code = 200
+        resp._content = b"{}"
+        return resp
+
+    monkeypatch.setattr(requests.Session, "send", fake_send)
+    install_request_headers()
+    requests.get("https://www.csindex.com.cn/x")
+    requests.get("https://www.csindex.com.cn/x", timeout=5)
+    assert timeouts == [DEFAULT_TIMEOUT, 5]

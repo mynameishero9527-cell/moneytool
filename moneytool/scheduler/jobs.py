@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import threading
+import time
 import traceback
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -66,7 +67,10 @@ log = get_logger(__name__)
 FLOW_PAUSE_MINUTES = 30
 FLOW_PAUSE_MAX_MINUTES = 240
 FLOW_READY_HOUR = 18  # 新浪日频资金流当日数据可用的大致时刻（北京时间）
-FLOW_REFRESH_HOURS = 6  # 同一只股票两次增量尝试的最小间隔，源端未更新时不反复请求
+FLOW_REFRESH_HOURS = 6
+LANE_POLL_SECONDS = 60
+LANE_IDLE_SECONDS = 600  # 一路没有待办后隔多久再查（资金流每日增量靠它触发）
+CATCHUP_EVERY_SECONDS = 1800  # 同一只股票两次增量尝试的最小间隔，源端未更新时不反复请求
 
 
 class JobRunner:
@@ -495,7 +499,7 @@ class JobRunner:
     # ---- 回补（后台线程，分批持锁） ----
 
     def job_backfill_batch(self, batch: int | None = None) -> tuple[int, int]:
-        """日线（Baostock）与资金流（东财）两个源互不相干，各开一个线程同时拉；
+        """日线与资金流各拉一批（命令行 backfill 用；后台由 backfill_loop 的两路循环分别调度）。
         网络请求都在写锁外进行，拉完一批才持锁写库，盘中任务不会被回补挡住。"""
         day = today_sh()
         n = batch or self.ctx.settings.backfill.batch
@@ -583,22 +587,85 @@ class JobRunner:
         )
 
     def backfill_loop(self) -> None:
-        """后台循环：先做启动自检（参考数据 → 补算），再分批回补；分批释放锁让盘中任务插队。
-        一轮没有新进展即视为回补完成，随即同步概念成分（首次）并补算缺失的收盘结果；
-        资金流因东财不可用而暂停期间不补算，免得整段历史都落成价格模式。"""
+        """后台回补：先做启动自检（参考数据 → 补算），再让日线与资金流各跑一个循环，
+        按各自数据源的节奏分批拉取，互不等待（一路被限流或暂停不拖慢另一路）。
+        两路都没有新进展即视为回补完成，随即同步概念成分（首次）并补算缺失的收盘结果；
+        资金流暂停期间不补算，免得整段历史都落成价格模式。"""
         self.job_startup_check()
+        lanes = {
+            "bars": BackfillLane("bars", self._backfill_bars_batch),
+            "flow": BackfillLane("flow", self._backfill_flow_batch, paused=self.flow_paused),
+        }
+        threads = [
+            threading.Thread(
+                target=self._lane_loop, args=(lane,), name=f"backfill-{lane.name}", daemon=True
+            )
+            for lane in lanes.values()
+        ]
+        for t in threads:
+            t.start()
+        last_catchup: float | None = None
         while not self.stop_event.is_set():
-            b, f = self.job_backfill_batch()
-            if b == 0 and f == 0:
-                if self.flow_paused():
-                    self.stop_event.wait(60)
-                    continue
-                log.info("backfill_idle")
-                self._concepts_if_empty()
-                self.job_catchup()
-                self.stop_event.wait(1800)
-            else:
+            idle = all(lane.idle.is_set() for lane in lanes.values())
+            if idle and not self.flow_paused():
+                progressed = sum(lane.take_progress() for lane in lanes.values()) > 0
+                due = (
+                    last_catchup is None or time.monotonic() - last_catchup >= CATCHUP_EVERY_SECONDS
+                )
+                if progressed or due:
+                    log.info("backfill_idle")
+                    self._concepts_if_empty()
+                    self.job_catchup()
+                    last_catchup = time.monotonic()
+            self.stop_event.wait(LANE_POLL_SECONDS)
+        for t in threads:
+            t.join(timeout=5)
+
+    def _lane_loop(self, lane: BackfillLane) -> None:
+        size = self.ctx.settings.backfill.batch
+        while not self.stop_event.is_set():
+            if lane.paused():
+                lane.idle.clear()
+                self.stop_event.wait(LANE_POLL_SECONDS)
+                continue
+            try:
+                n = lane.batch(today_sh(), size)
+            except Exception as exc:
+                log.error("backfill_lane_failed", lane=lane.name, error=str(exc))
+                n = 0
+            if n > 0:
+                lane.record(n)
                 self.stop_event.wait(1)
+            else:
+                lane.idle.set()
+                self.stop_event.wait(LANE_IDLE_SECONDS)
+
+
+class BackfillLane:
+    """一路回补（日线或资金流）的状态：是否已无待办、自上次补算以来是否有新进展。"""
+
+    def __init__(
+        self,
+        name: str,
+        batch: Callable[[dt.date, int], int],
+        paused: Callable[[], bool] | None = None,
+    ) -> None:
+        self.name = name
+        self.batch = batch
+        self.paused = paused or (lambda: False)
+        self.idle = threading.Event()
+        self._lock = threading.Lock()
+        self._progress = 0
+
+    def record(self, n: int) -> None:
+        with self._lock:
+            self._progress += n
+        self.idle.clear()
+
+    def take_progress(self) -> int:
+        with self._lock:
+            n, self._progress = self._progress, 0
+        return n
 
 
 def reference_stale(conn: duckdb.DuckDBPyConnection, day: dt.date) -> bool:

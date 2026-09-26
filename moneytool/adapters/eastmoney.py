@@ -14,10 +14,13 @@ import polars as pl
 from moneytool.adapters.base import (
     AdapterError,
     CaptchaError,
+    CircuitBreaker,
     FetchContext,
     RateLimiter,
+    SourceBlockedError,
     code_to_em_market,
     is_captcha_like,
+    looks_blocked,
     normalize_code,
     retry,
 )
@@ -66,9 +69,12 @@ def _flow_std(df: pl.DataFrame, rename: dict[str, str]) -> pl.DataFrame:
 class EastmoneyAdapter:
     source = SOURCE
 
-    def __init__(self, ctx: FetchContext, ak: Any | None = None) -> None:
+    def __init__(
+        self, ctx: FetchContext, ak: Any | None = None, breaker: CircuitBreaker | None = None
+    ) -> None:
         self.ctx = ctx
         self._ak = ak
+        self.breaker = breaker or CircuitBreaker()
 
     @property
     def ak(self) -> Any:
@@ -104,10 +110,23 @@ class EastmoneyAdapter:
             raise CaptchaError(SOURCE, endpoint, "当日已触发验证，个股级请求暂停")
 
         def once() -> pl.DataFrame:
+            left = self.breaker.remaining()
+            if left > 0:
+                raise SourceBlockedError(
+                    SOURCE,
+                    endpoint,
+                    f"东财疑似封禁本机 IP，冷却中（约 {left / 60:.0f} 分钟后再试）",
+                )
             (limiter or (self.ctx.per_stock_limiter if per_stock else self.ctx.limiter)).wait()
             try:
                 raw = _pdf(call())
             except Exception as exc:
+                if looks_blocked(exc):
+                    span = self.breaker.failed()
+                    if span:
+                        log.warning(
+                            "eastmoney_cooldown", minutes=round(span / 60), error=str(exc)[:200]
+                        )
                 if is_captcha_like(exc):
                     if per_stock:  # 全市场接口返回异常不代表个股接口被拦，不连带停掉回补
                         self.ctx.captcha_tripped[SOURCE] = day
@@ -115,6 +134,7 @@ class EastmoneyAdapter:
                         SOURCE, endpoint, f"疑似验证拦截: {type(exc).__name__}"
                     ) from exc
                 raise
+            self.breaker.succeeded()
             if raw.is_empty():
                 raise AdapterError(SOURCE, endpoint, "空响应")
             return raw

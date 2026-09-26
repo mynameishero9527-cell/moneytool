@@ -93,6 +93,13 @@ def _open_db(settings: Settings) -> tuple[duckdb.DuckDBPyConnection | None, str 
         return None, "locked" if "lock" in str(exc).lower() else f"error: {exc}"
 
 
+def stale_code(running_stamp: float | None) -> bool:
+    """主程序记录的代码时间早于当前代码（旧版主程序不报时间，也按旧代码处理）。"""
+    from moneytool.app import code_stamp  # noqa: PLC0415
+
+    return running_stamp is None or code_stamp() > float(running_stamp) + 1
+
+
 def _http_summary(settings: Settings) -> dict[str, Any]:
     import httpx  # noqa: PLC0415
 
@@ -211,6 +218,11 @@ def build_report(
     try:
         summary = _http_summary(settings)
         out.append(f"主程序正在运行（网页与接口 {web} 正常），通过本机接口读取。")
+        if stale_code(summary.get("code_stamp")):
+            problems.append(
+                "主程序运行的还是旧代码（启动后代码已更新，新的数据源与限速设置未生效）："
+                "关闭 moneytool 窗口后重新运行 start.bat"
+            )
     except Exception as exc:
         summary = None
         http_error = f"{type(exc).__name__}: {exc}"[:200]

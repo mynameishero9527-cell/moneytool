@@ -134,6 +134,8 @@ def admin_recompute(body: RecomputeRequest, request: Request) -> Envelope:
 @router.get("/diagnose", response_model=Envelope)
 def diagnose(conn: duckdb.DuckDBPyConnection = Depends(get_ro_conn)) -> Envelope:
     """`moneytool doctor` 在主程序运行时（库被独占）通过这里取数据库部分。"""
+    from moneytool.app import PROCESS_CODE_STAMP  # noqa: PLC0415
     from moneytool.diagnose import db_summary  # noqa: PLC0415
 
-    return Envelope(meta=Meta(trade_date=None, status=DataStatus.CONFIRMED), data=db_summary(conn))
+    data = {**db_summary(conn), "code_stamp": PROCESS_CODE_STAMP}
+    return Envelope(meta=Meta(trade_date=None, status=DataStatus.CONFIRMED), data=data)

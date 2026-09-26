@@ -34,6 +34,61 @@ class CaptchaError(AdapterError):
     """东财滑块验证 / 反爬：响应非 JSON 或为空。当日停止该源个股级请求。"""
 
 
+class SourceBlockedError(CaptchaError):
+    """数据源疑似封禁本机 IP，冷却期内不发请求（不重试，回补遇到即暂停）。"""
+
+
+BLOCK_MARKERS = ("RemoteDisconnected", "Connection aborted", "502", "Bad Gateway")
+
+
+def looks_blocked(exc: BaseException) -> bool:
+    """连接被对端直接断开 / 网关 502：东财封 IP 时的典型表现。"""
+    text = f"{type(exc).__name__}: {exc}"
+    return any(m in text for m in BLOCK_MARKERS)
+
+
+class CircuitBreaker:
+    """连续 `threshold` 次疑似封禁即熔断 `cooldown` 秒，再次熔断时长翻倍到 `max_cooldown`；
+    成功一次复位。进程内所有线程共享，冷却期内请求直接失败、不触网，避免越封越久。"""
+
+    def __init__(
+        self,
+        threshold: int = 2,
+        cooldown: float = 900.0,
+        max_cooldown: float = 7200.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.threshold = threshold
+        self.cooldown = cooldown
+        self.max_cooldown = max_cooldown
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._failures = 0
+        self._trips = 0
+        self._open_until = 0.0
+
+    def remaining(self) -> float:
+        with self._lock:
+            return max(0.0, self._open_until - self._clock())
+
+    def succeeded(self) -> None:
+        with self._lock:
+            self._failures = 0
+            self._trips = 0
+
+    def failed(self) -> float:
+        """记一次疑似封禁；熔断时返回冷却秒数，否则 0。"""
+        with self._lock:
+            self._failures += 1
+            if self._failures < self.threshold:
+                return 0.0
+            self._failures = 0
+            span = float(min(self.cooldown * 2**self._trips, self.max_cooldown))
+            self._trips += 1
+            self._open_until = self._clock() + span
+            return span
+
+
 class ContractError(AdapterError):
     """响应列名或类型与契约不符。原始响应已保留。"""
 

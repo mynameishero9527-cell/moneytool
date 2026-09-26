@@ -25,6 +25,15 @@ from moneytool.storage.conn import Database
 from moneytool.storage.migrate import migrate
 
 TZ = ZoneInfo("Asia/Shanghai")
+
+
+def code_stamp() -> float:
+    """程序代码最后修改时间（秒）。主程序启动时记一次，doctor 比较以发现“改了代码没重启”。"""
+    root = Path(__file__).parent
+    return max((p.stat().st_mtime for p in root.rglob("*.py")), default=0.0)
+
+
+PROCESS_CODE_STAMP = code_stamp()
 log = get_logger(__name__)
 
 

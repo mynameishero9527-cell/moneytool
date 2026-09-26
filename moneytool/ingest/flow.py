@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 import duckdb
 import polars as pl
 
-from moneytool.adapters.base import AdapterError, AdaptiveLimiter, CaptchaError
+from moneytool.adapters.base import AdapterError, AdaptiveLimiter, CaptchaError, SourceBlockedError
 from moneytool.adapters.registry import Adapters
 from moneytool.compute.flow import FLOW_COLS, reconcile, segment_diff
 from moneytool.ingest.bars import mark_progress, pending_codes
@@ -321,7 +321,10 @@ def fetch_flow(
                 limiter.failed()
             with state_lock:
                 failures += 1
-                if isinstance(exc, CaptchaError):
+                if isinstance(exc, SourceBlockedError):
+                    stall.append(f"源端封禁冷却：{exc}")
+                    halt.set()
+                elif isinstance(exc, CaptchaError):
                     stall.append(f"触发验证：{exc}")
                     halt.set()
                 elif failures >= max_consecutive_failures and not halt.is_set():
