@@ -58,6 +58,25 @@ def test_run_job_waits_for_lock(ctx: AppContext) -> None:
     assert runner.run_job("after", lambda conn: 1) == 1
 
 
+def test_run_store_waits_instead_of_dropping(
+    ctx: AppContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = JobRunner(ctx)
+    runner.stop_event.wait = lambda timeout=None: False  # type: ignore[method-assign]
+    real = runner.run_job
+    attempts: list[int] = []
+
+    def flaky(name: str, fn: object, **kw: object) -> object:
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise LockBusyError({"owner": "recompute"})
+        return real(name, fn, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(runner, "run_job", flaky)
+    assert runner.run_store("backfill", lambda conn: 5) == 5
+    assert len(attempts) == 3
+
+
 def test_schedule_has_all_slots(ctx: AppContext) -> None:
     sch = build_scheduler(JobRunner(ctx))
     ids = {j.id for j in sch.get_jobs()}
@@ -79,7 +98,7 @@ def test_schedule_has_all_slots(ctx: AppContext) -> None:
 
 def _offline(runner: JobRunner, calls: list[str]) -> None:
     runner.job_reference_sync = lambda day=None: calls.append("reference")  # type: ignore[method-assign]
-    runner._sync_concepts = lambda conn, day: calls.append("concepts") or 0  # type: ignore[method-assign]
+    runner._sync_concepts = lambda day: calls.append("concepts") or 0  # type: ignore[method-assign]
 
 
 def test_startup_syncs_reference_when_empty(ctx: AppContext) -> None:

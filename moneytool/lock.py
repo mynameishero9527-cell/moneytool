@@ -5,6 +5,9 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import threading
+import time
+from collections import deque
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -36,14 +39,61 @@ def read_holder(lock_path: Path) -> dict[str, str]:
         return {}
 
 
+class _FairGate:
+    """进程内按到达顺序排队。文件锁本身不保证公平：连续逐日补算这类“放锁即再抢”的任务
+    会让其他线程等满超时也抢不到。"""
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._queue: deque[object] = deque()
+        self._held = False
+
+    def acquire(self, timeout: float) -> bool:
+        token = object()
+        deadline = time.monotonic() + timeout
+        with self._cond:
+            self._queue.append(token)
+            while self._held or self._queue[0] is not token:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._queue.remove(token)
+                    self._cond.notify_all()
+                    return False
+                self._cond.wait(remaining)
+            self._queue.popleft()
+            self._held = True
+            return True
+
+    def release(self) -> None:
+        with self._cond:
+            self._held = False
+            self._cond.notify_all()
+
+
+_gates: dict[str, _FairGate] = {}
+_gates_guard = threading.Lock()
+
+
+def _gate(lock_path: Path) -> _FairGate:
+    key = str(lock_path.resolve())
+    with _gates_guard:
+        return _gates.setdefault(key, _FairGate())
+
+
 @contextmanager
 def write_lock(lock_path: Path, owner: str, timeout: float = 60.0) -> Iterator[None]:
-    """持锁执行写库任务。超时抛 `LockBusyError` 并带持有者信息。"""
+    """持锁执行写库任务。进程内先按到达顺序排队，再用文件锁与其他进程互斥；
+    超时抛 `LockBusyError` 并带持有者信息。"""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
+    gate = _gate(lock_path)
+    deadline = time.monotonic() + timeout
+    if not gate.acquire(timeout):
+        raise LockBusyError(read_holder(lock_path))
     lock = FileLock(str(lock_path))
     try:
-        lock.acquire(timeout=timeout)
+        lock.acquire(timeout=max(deadline - time.monotonic(), 0.05))
     except Timeout as exc:
+        gate.release()
         raise LockBusyError(read_holder(lock_path)) from exc
     holder = _holder_path(lock_path)
     try:
@@ -62,6 +112,7 @@ def write_lock(lock_path: Path, owner: str, timeout: float = 60.0) -> Iterator[N
     finally:
         holder.unlink(missing_ok=True)
         lock.release()
+        gate.release()
 
 
 def force_unlock(lock_path: Path) -> bool:

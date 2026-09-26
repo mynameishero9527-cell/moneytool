@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import dataclass, field
 
 import duckdb
 import polars as pl
@@ -158,46 +159,69 @@ def sync_index_members(conn: duckdb.DuckDBPyConnection, ad: Adapters, day: dt.da
     return total
 
 
-def sync_concepts(
-    conn: duckdb.DuckDBPyConnection, ad: Adapters, day: dt.date, *, max_boards: int | None = None
-) -> tuple[int, int]:
-    """东财概念列表 + 成分快照。成分是个股级接口，逐个板块串行带间隔；夜间任务用。"""
+@dataclass
+class ConceptFetch:
+    sectors: pl.DataFrame
+    members: list[pl.DataFrame] = field(default_factory=list)
+    issues: list[tuple[QualityStatus, str]] = field(default_factory=list)
+
+
+def fetch_concepts(ad: Adapters, day: dt.date, *, max_boards: int | None = None) -> ConceptFetch:
+    """东财概念列表 + 成分（只拉不写，写库锁外调用）。成分是个股级接口，逐个板块串行带间隔。"""
     boards = ad.eastmoney.concept_list(day)
-    sectors = boards.select(
-        ("concept:" + pl.col("board_code")).alias("sector_id"),
-        "name",
-        pl.lit(SectorLevel.CONCEPT.value).alias("level"),
-        pl.lit(None, dtype=pl.Utf8).alias("parent_id"),
-        pl.lit("eastmoney").alias("source"),
+    out = ConceptFetch(
+        boards.select(
+            ("concept:" + pl.col("board_code")).alias("sector_id"),
+            "name",
+            pl.lit(SectorLevel.CONCEPT.value).alias("level"),
+            pl.lit(None, dtype=pl.Utf8).alias("parent_id"),
+            pl.lit("eastmoney").alias("source"),
+        )
     )
-    n_sectors = upsert(conn, "sector", sectors)
-    members: list[pl.DataFrame] = []
-    for i, row in enumerate(sectors.iter_rows(named=True)):
+    for i, row in enumerate(out.sectors.iter_rows(named=True)):
         if max_boards is not None and i >= max_boards:
             break
         try:
             cons = ad.eastmoney.concept_cons(row["name"], day)
         except AdapterError as exc:
-            record_quality(
-                conn,
-                source="eastmoney",
-                endpoint="concept_cons",
-                trade_date=day,
-                status=QualityStatus.CAPTCHA if "验证" in exc.reason else QualityStatus.MISSING,
-                reason=f"{row['name']}: {exc.reason}",
-            )
-            if "验证" in exc.reason:
+            captcha = "验证" in exc.reason
+            status = QualityStatus.CAPTCHA if captcha else QualityStatus.MISSING
+            out.issues.append((status, f"{row['name']}: {exc.reason}"))
+            if captcha:
                 break
             continue
-        members.append(
+        out.members.append(
             cons.select(
                 pl.lit(row["sector_id"]).alias("sector_id"),
                 "code",
                 pl.lit(day).alias("snapshot_date"),
             )
         )
+    return out
+
+
+def store_concepts(
+    conn: duckdb.DuckDBPyConnection, fetched: ConceptFetch, day: dt.date
+) -> tuple[int, int]:
+    for status, reason in fetched.issues:
+        record_quality(
+            conn,
+            source="eastmoney",
+            endpoint="concept_cons",
+            trade_date=day,
+            status=status,
+            reason=reason,
+        )
+    n_sectors = upsert(conn, "sector", fetched.sectors)
+    members = fetched.members
     n_members = upsert(conn, "sector_member_snapshot", pl.concat(members)) if members else 0
     return n_sectors, n_members
+
+
+def sync_concepts(
+    conn: duckdb.DuckDBPyConnection, ad: Adapters, day: dt.date, *, max_boards: int | None = None
+) -> tuple[int, int]:
+    return store_concepts(conn, fetch_concepts(ad, day, max_boards=max_boards), day)
 
 
 def members_as_of(

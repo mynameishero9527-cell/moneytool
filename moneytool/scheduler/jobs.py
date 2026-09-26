@@ -47,13 +47,14 @@ from moneytool.ingest.flow import (
     store_flow,
 )
 from moneytool.ingest.reference import (
+    fetch_concepts,
+    store_concepts,
     sync_calendar,
-    sync_concepts,
     sync_index_members,
     sync_securities,
     sync_shenwan,
 )
-from moneytool.lock import write_lock
+from moneytool.lock import LockBusyError, write_lock
 from moneytool.logging import get_logger
 from moneytool.notify import dispatch, pending_quiet, push
 from moneytool.report import close_brief, premarket_brief, save_brief
@@ -79,6 +80,7 @@ LANE_POLL_SECONDS = 60
 LANE_IDLE_SECONDS = 600  # 一路没有待办后隔多久再查（资金流每日增量靠它触发）
 CATCHUP_EVERY_SECONDS = 1800  # 同一只股票两次增量尝试的最小间隔，源端未更新时不反复请求
 TIER_DONE_KEY = "bars_tier_done"
+STORE_WAIT_SECONDS = 1800
 
 
 class JobRunner:
@@ -123,6 +125,18 @@ class JobRunner:
                     reason=str(exc)[:500],
                 )
                 return None
+
+    def run_store(self, name: str, fn: Callable[[duckdb.DuckDBPyConnection], Any]) -> Any:
+        """回补落库：拉到的一批数据花了分钟级时间，锁被别的进程占着就等，不丢弃。"""
+        deadline = time.monotonic() + STORE_WAIT_SECONDS
+        while True:
+            try:
+                return self.run_job(name, fn)
+            except LockBusyError as exc:
+                if self.stop_event.is_set() or time.monotonic() >= deadline:
+                    raise
+                log.warning("backfill_store_waiting", job=name, error=str(exc))
+                self.stop_event.wait(5)
 
     @staticmethod
     def _record(
@@ -196,21 +210,30 @@ class JobRunner:
         with self.ctx.db.read() as conn:
             has = conn.execute("SELECT 1 FROM sector WHERE level = 'concept' LIMIT 1").fetchone()
         if not has:
-            self.run_job("concept_sync", lambda conn: self._sync_concepts(conn, day))
+            self._sync_concepts(day)
 
-    def _sync_concepts(self, conn: duckdb.DuckDBPyConnection, day: dt.date) -> int:
+    def _sync_concepts(self, day: dt.date) -> int:
+        """逐板块拉成分可能要几分钟，在写库锁外拉，拉完再持锁写入，不挡住其他任务落库。"""
         try:
-            return sync_concepts(conn, self.ctx.adapters, day, max_boards=60)[0]
+            fetched = fetch_concepts(self.ctx.adapters, day, max_boards=60)
         except AdapterError as exc:
-            record_quality(
-                conn,
-                source="eastmoney",
-                endpoint="concept_list",
-                trade_date=day,
-                status=QualityStatus.MISSING,
-                reason=str(exc),
-            )
+            reason = str(exc)
+
+            def fail(conn: duckdb.DuckDBPyConnection) -> int:
+                record_quality(
+                    conn,
+                    source="eastmoney",
+                    endpoint="concept_list",
+                    trade_date=day,
+                    status=QualityStatus.MISSING,
+                    reason=reason,
+                )
+                return 0
+
+            self.run_job("concept_sync", fail)
             return 0
+        out = self.run_store("concept_sync", lambda conn: store_concepts(conn, fetched, day)[0])
+        return out if isinstance(out, int) else 0
 
     def catchup_days(self, conn: duckdb.DuckDBPyConnection, day: dt.date) -> list[dt.date]:
         """最近 N 个已收盘交易日中：当日参数版本下无 confirmed 结果、且日线覆盖足够的日期（升序）。"""
@@ -441,14 +464,17 @@ class JobRunner:
     def job_nightly(self) -> None:
         day = today_sh()
         ad = self.ctx.adapters
+        with self.ctx.db.read() as conn:
+            trading = is_trading_day(conn, day)
+        if trading:
+            self._sync_concepts(day)
 
         def work(conn: duckdb.DuckDBPyConnection) -> int:
             n = 0
-            if is_trading_day(conn, day):
-                if self.flow_source == "eastmoney":  # 新浪来源的日频正式值由回补线程每日增量拉取
-                    codes = self._reconcile_sample_codes(conn, day)
-                    n = reconcile_sample(conn, ad, day, codes)
-                self._sync_concepts(conn, day)
+            if trading and self.flow_source == "eastmoney":
+                # 新浪来源的日频正式值由回补线程每日增量拉取
+                codes = self._reconcile_sample_codes(conn, day)
+                n = reconcile_sample(conn, ad, day, codes)
             confirmed = latest_confirmed_date(conn)
             if confirmed is not None:
                 labels = compute_labels(conn, confirmed, self.ctx.params_for(confirmed))
@@ -574,7 +600,7 @@ class JobRunner:
             log.error("backfill_fetch_failed", task=BARS_TASK, error=str(exc))
             lane.end()
             return 0
-        out = self.run_job(
+        out = self.run_store(
             "backfill",
             lambda conn: store_bars(conn, results, day, ranges=ranges, full_start=tiers[-1].start),
         )
@@ -696,7 +722,7 @@ class JobRunner:
             return 0
         if any(not isinstance(r, AdapterError) for _, r in results):
             self.flow_pause_streak = 0
-        out = self.run_job("backfill_flow", lambda conn: store_flow(conn, results, day, since))
+        out = self.run_store("backfill_flow", lambda conn: store_flow(conn, results, day, since))
         lane.end()
         return out if isinstance(out, int) else 0
 
