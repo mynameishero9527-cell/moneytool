@@ -118,7 +118,6 @@ def run(
     runner = JobRunner(ctx)
     scheduler = None
     if not no_scheduler:
-        threading.Thread(target=runner.job_startup_check, name="startup_check", daemon=True).start()
         scheduler = build_scheduler(runner)
         scheduler.start()
         start_backfill_thread(runner)

@@ -60,6 +60,8 @@ class ScheduleConfig(BaseModel):
     confirm_deadline: str = "20:00"  # 最晚用实时累计值代替
     confirm_probe_minutes: int = 30
     clock_drift_warn_seconds: int = 120
+    catchup_days: int = 60  # 启动 / 回补完成后补算最近 N 个交易日缺失的收盘结果
+    catchup_min_coverage: float = 0.8  # 当日日线覆盖在市证券比例不足则不补算，避免用残缺数据出结论
 
 
 class Settings(BaseSettings):

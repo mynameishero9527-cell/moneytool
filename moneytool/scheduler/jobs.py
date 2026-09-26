@@ -137,25 +137,97 @@ class JobRunner:
         self.run_job("reference_sync", work)
 
     def job_startup_check(self) -> None:
-        """启动时：最近交易日 confirmed 缺则补跑收盘全量（用日频数据）。"""
+        """启动时：参考数据缺失（首次运行、或周末 / 节假日启动错过 08:25）先同步，再补算缺失的收盘结果。"""
         day = today_sh()
-
-        def work(conn: duckdb.DuckDBPyConnection) -> int:
-            prev = previous_trading_day(conn, day + dt.timedelta(days=1))
-            if prev is None:
-                return 0
-            last = latest_confirmed_date(conn)
-            if last is not None and last >= prev:
-                return 0
-            has_flow = conn.execute(
-                "SELECT count(*) FROM flow_daily WHERE trade_date = ?", [prev]
+        with self.ctx.db.read() as conn:
+            stale = reference_stale(conn, day)
+            no_concepts = not conn.execute(
+                "SELECT 1 FROM sector WHERE level = 'concept' LIMIT 1"
             ).fetchone()
-            if not has_flow or has_flow[0] == 0:
-                return 0
-            res = run(conn, self.ctx.params_for(prev), prev)
-            return res.stage_rows
+        if stale:
+            self.job_reference_sync(day)
+        if no_concepts:
+            self.run_job("concept_sync", lambda conn: self._sync_concepts(conn, day))
+        self.job_catchup()
 
-        self.run_job("startup_check", work)
+    def _sync_concepts(self, conn: duckdb.DuckDBPyConnection, day: dt.date) -> int:
+        try:
+            return sync_concepts(conn, self.ctx.adapters, day, max_boards=60)[0]
+        except AdapterError as exc:
+            record_quality(
+                conn,
+                source="eastmoney",
+                endpoint="concept_list",
+                trade_date=day,
+                status=QualityStatus.MISSING,
+                reason=str(exc),
+            )
+            return 0
+
+    def catchup_days(self, conn: duckdb.DuckDBPyConnection, day: dt.date) -> list[dt.date]:
+        """最近 N 个已收盘交易日中：当日参数版本下无 confirmed 结果、且日线覆盖足够的日期（升序）。"""
+        s = self.ctx.settings.schedule
+        rows = conn.execute(
+            "SELECT trade_date FROM trade_calendar WHERE is_open AND trade_date < ? "
+            "ORDER BY trade_date DESC LIMIT ?",
+            [day, s.catchup_days],
+        ).fetchall()
+        total = conn.execute("SELECT count(*) FROM security WHERE NOT is_delisting").fetchone()
+        if not rows or not total or total[0] == 0:
+            return []
+        out: list[dt.date] = []
+        for (d,) in sorted(rows):
+            done = conn.execute(
+                "SELECT 1 FROM market_daily WHERE trade_date = ? AND segment = 'close' "
+                "AND param_version = ? LIMIT 1",
+                [d, self.ctx.params_for(d).version],
+            ).fetchone()
+            if done:
+                continue
+            cov = conn.execute(
+                "SELECT (SELECT count(*) FROM bar_daily WHERE trade_date = ?), "
+                "(SELECT count(*) FROM flow_daily WHERE trade_date = ?)",
+                [d, d],
+            ).fetchone()
+            if cov is None:
+                continue
+            need = s.catchup_min_coverage * total[0]
+            # 资金流部分到位时板块合计会失真，等回补完；全缺则走价格模式（结果标降级）
+            if cov[0] >= need and (cov[1] == 0 or cov[1] >= need):
+                out.append(d)
+        return out
+
+    def job_catchup(self) -> int:
+        """按日期顺序补算，每天单独持锁，盘中任务可插队。补算完为最后一天生成收盘简报。"""
+        day = today_sh()
+        with self.ctx.db.read() as conn:
+            days = self.catchup_days(conn, day)
+        done: list[dt.date] = []
+
+        def compute(d: dt.date) -> Callable[[duckdb.DuckDBPyConnection], PipelineResult]:
+            return lambda conn: run(conn, self.ctx.params_for(d), d)
+
+        for d in days:
+            if self.stop_event.is_set():
+                break
+            res = self.run_job("catchup", compute(d))
+            if res is not None:
+                done.append(d)
+        if done:
+            last = done[-1]
+            version = self.ctx.params_for(last).version
+            self.run_job(
+                "catchup_brief",
+                lambda conn: save_brief(
+                    conn,
+                    last,
+                    "close",
+                    close_brief(conn, last, version),
+                    self.ctx.settings.briefs_dir,
+                ),
+            )
+            log.info("catchup_done", days=len(done), first=str(done[0]), last=str(last))
+        return len(done)
 
     # ---- 盘中分段 ----
 
@@ -312,17 +384,7 @@ class JobRunner:
             if is_trading_day(conn, day):
                 codes = self._reconcile_sample_codes(conn, day)
                 n = reconcile_sample(conn, ad, day, codes)
-                try:
-                    sync_concepts(conn, ad, day, max_boards=60)
-                except AdapterError as exc:
-                    record_quality(
-                        conn,
-                        source="eastmoney",
-                        endpoint="concept_list",
-                        trade_date=day,
-                        status=QualityStatus.MISSING,
-                        reason=str(exc),
-                    )
+                self._sync_concepts(conn, day)
             confirmed = latest_confirmed_date(conn)
             if confirmed is not None:
                 labels = compute_labels(conn, confirmed, self.ctx.params_for(confirmed))
@@ -418,14 +480,24 @@ class JobRunner:
         return out if isinstance(out, tuple) else (0, 0)
 
     def backfill_loop(self) -> None:
-        """后台循环，直到没有待回补或收到停止。分批释放锁让盘中任务插队。"""
+        """后台循环：先做启动自检（参考数据 → 补算），再分批回补；分批释放锁让盘中任务插队。
+        一轮没有新进展即视为回补完成（或被限流暂停），随即补算缺失的收盘结果。"""
+        self.job_startup_check()
         while not self.stop_event.is_set():
             b, f = self.job_backfill_batch()
             if b == 0 and f == 0:
                 log.info("backfill_idle")
+                self.job_catchup()
                 self.stop_event.wait(1800)
             else:
                 self.stop_event.wait(1)
+
+
+def reference_stale(conn: duckdb.DuckDBPyConnection, day: dt.date) -> bool:
+    """证券表为空或交易日历未覆盖今天：需要立即同步参考数据。"""
+    sec = conn.execute("SELECT count(*) FROM security").fetchone()
+    cal = conn.execute("SELECT max(trade_date) FROM trade_calendar").fetchone()
+    return not sec or sec[0] == 0 or not cal or cal[0] is None or cal[0] < day
 
 
 def clock_drift_seconds(ad: Any) -> float | None:

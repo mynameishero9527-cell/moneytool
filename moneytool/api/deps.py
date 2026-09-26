@@ -70,7 +70,10 @@ def market_status(
     conn: duckdb.DuckDBPyConnection, day: dt.date | None, segment: str | None
 ) -> tuple[DataStatus, str | None]:
     if day is None:
-        return DataStatus.MISSING, "无数据"
+        return (
+            DataStatus.MISSING,
+            "尚无计算结果：首次运行需先回补历史数据（进度见「数据状态」页），完成后自动计算",
+        )
     row = conn.execute(
         "SELECT data_status FROM market_daily WHERE trade_date = ? AND segment = ? ORDER BY param_version DESC LIMIT 1",
         [day, segment or "close"],

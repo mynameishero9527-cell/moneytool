@@ -16,7 +16,9 @@ python -m moneytool init          # 建 ~/.moneytool：配置、参数版本、�
 python -m moneytool run           # 调度 + 回补 + Web，默认 http://127.0.0.1:8000
 ```
 
-Windows（PowerShell）：
+Windows 可直接双击仓库根目录的 `start.bat`：首次运行自动创建虚拟环境、安装依赖、初始化数据目录，然后启动；额外参数原样传给 `run`（如 `start.bat --port 8765`）。`update.bat` 先拉取 `develop` 最新代码再启动，依赖有变化时自动重装。
+
+手动步骤（PowerShell）：
 
 ```powershell
 py -3.12 -m venv .venv
