@@ -16,7 +16,7 @@ python -m moneytool init          # 建 ~/.moneytool：配置、参数版本、�
 python -m moneytool run           # 调度 + 回补 + Web，默认 http://127.0.0.1:8000
 ```
 
-Windows 可直接双击仓库根目录的 `start.bat`：首次运行自动创建虚拟环境、安装依赖、初始化数据目录，然后启动；额外参数原样传给 `run`（如 `start.bat --port 8765`）。`update.bat` 先拉取 `develop` 最新代码再启动，依赖有变化时自动重装。
+Windows 可直接双击仓库根目录的 `start.bat`：首次运行自动创建虚拟环境、安装依赖、初始化数据目录，然后启动；额外参数原样传给 `run`（如 `start.bat --port 8765`）。`update.bat` 先拉取 `develop` 最新代码再启动，依赖有变化时自动重装。`doctor.bat` 做一次诊断（主程序运行中也可用），报告存为 `reports\doctor-latest.txt` 并用记事本打开，遇到问题把它发给开发者。
 
 手动步骤（PowerShell）：
 
@@ -31,14 +31,14 @@ python -m moneytool run
 
 Windows 没有 `make`，`make check` 对应的命令为 `ruff check . ; ruff format --check . ; mypy moneytool ; pytest -q -m "not network"`，重新构建前端用 `python scripts/build_frontend.py`。
 
-数据目录可用 `--data-dir` 或环境变量 `MONEYTOOL_DATA__DIR` 覆盖。首次运行会在后台回补 5 年日线与 2 年日频资金流，进度见「数据状态」页。
+数据目录可用 `--data-dir` 或环境变量 `MONEYTOOL_DATA__DIR` 覆盖。首次运行会先同步证券列表、交易日历与板块成分，再在后台回补 5 年日线与日频资金流，进度见「数据状态」页。个股资金流为防限流每只间隔 5 秒逐只拉取，全市场约需半天，可让程序整夜运行；回补期间页面暂无结果。回补完成后自动补算最近 60 个交易日（`[schedule] catchup_days`），之后每个交易日收盘后自动更新。
 
 常用命令：
 
 | 命令 | 作用 |
 | --- | --- |
 | `python -m moneytool status` | 最近确认日、当日分段、回补进度、质量记录 |
-| `python -m moneytool doctor` | 数据源连通、时钟偏差、锁、参数版本自检 |
+| `python -m moneytool doctor [--out 报告.txt] [--offline] [--log-lines 200]` | 诊断报告：环境、锁、数据库与回补进度、失败任务、质量记录、数据源连通、日志错误摘要与结论；主程序运行中也可用 |
 | `python -m moneytool fetch --what reference\|segment:1030_1130\|close\|nightly` | 手动触发一次采集 |
 | `python -m moneytool recompute --date 2026-05-08` 或 `--date 2026-01-01:2026-05-08` | 按当日生效参数重算并存档 |
 | `python -m moneytool explain --sector sw:801010 [--date ...]` | 打印阶段判定证据 |
