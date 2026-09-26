@@ -103,11 +103,51 @@ def run(
     host: Annotated[str | None, typer.Option(help="覆盖监听地址")] = None,
     port: Annotated[int | None, typer.Option(help="覆盖端口")] = None,
 ) -> None:
-    """启动主进程：调度 + 回补线程 + Web。"""
+    """启动主进程：调度 + 回补线程 + Web。启停与崩溃都记入当日日志，doctor 据此判断上次运行结局。"""
+    from moneytool import lifecycle  # noqa: PLC0415
+
+    logs_dir = _logs_dir(data_dir)
+    stage = ["startup"]
+    try:
+        _run(data_dir, no_browser, no_scheduler, host, port, logs_dir, stage)
+    except (typer.Exit, KeyboardInterrupt):
+        raise
+    except SystemExit as exc:  # uvicorn 端口被占用等启动失败时 sys.exit(1)
+        if exc.code not in (0, None):
+            lifecycle.record_crash(
+                logs_dir,
+                RuntimeError(f"Web 服务退出（代码 {exc.code}），常见原因是端口被占用"),
+                stage[0],
+            )
+        raise
+    except Exception as exc:
+        lifecycle.record_crash(logs_dir, exc, stage[0])
+        raise
+
+
+def _logs_dir(data_dir: Path | None) -> Path:
+    from moneytool.config import DEFAULT_DATA_DIR, load_settings  # noqa: PLC0415
+
+    try:
+        return load_settings(data_dir).logs_dir
+    except Exception:
+        return (data_dir or DEFAULT_DATA_DIR) / "logs"
+
+
+def _run(
+    data_dir: Path | None,
+    no_browser: bool,
+    no_scheduler: bool,
+    host: str | None,
+    port: int | None,
+    logs_dir: Path,
+    stage: list[str],
+) -> None:
     import uvicorn  # noqa: PLC0415
 
+    from moneytool import lifecycle  # noqa: PLC0415
     from moneytool.api.server import create_app  # noqa: PLC0415
-    from moneytool.app import build_context  # noqa: PLC0415
+    from moneytool.app import PROCESS_CODE_STAMP, build_context  # noqa: PLC0415
     from moneytool.scheduler.jobs import JobRunner  # noqa: PLC0415
     from moneytool.scheduler.schedule import build_scheduler, start_backfill_thread  # noqa: PLC0415
 
@@ -117,6 +157,7 @@ def run(
     token = ctx.settings.server.token
     if listen not in ("127.0.0.1", "localhost", "::1") and not token:
         typer.echo("监听非回环地址必须在 config.toml 的 [server] 设置 token", err=True)
+        ctx.close()
         raise typer.Exit(code=2)
 
     runner = JobRunner(ctx)
@@ -128,6 +169,10 @@ def run(
 
     fastapi_app = create_app(ctx.db, ctx=ctx, runner=runner, token=token)
     url = f"http://{listen}:{listen_port}"
+    lifecycle.record(
+        logs_dir, lifecycle.STARTED, version=__version__, url=url, code_stamp=PROCESS_CODE_STAMP
+    )
+    stage[0] = "running"
     typer.echo(f"moneytool {__version__} 运行中: {url}  (Ctrl+C 退出)")
     if not no_browser and ctx.settings.server.open_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
@@ -138,6 +183,7 @@ def run(
         if scheduler is not None:
             scheduler.shutdown(wait=False)
         ctx.close()
+    lifecycle.record(logs_dir, lifecycle.STOPPED)
 
 
 @app.command()

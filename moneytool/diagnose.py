@@ -93,6 +93,38 @@ def _open_db(settings: Settings) -> tuple[duckdb.DuckDBPyConnection | None, str 
         return None, "locked" if "lock" in str(exc).lower() else f"error: {exc}"
 
 
+def describe_last_run(log_files: list[Path]) -> tuple[str, str]:
+    """（上次运行情况，主程序未运行时要报的问题；无问题为空串）。"""
+    from moneytool.lifecycle import CRASHED, last_run, local_time  # noqa: PLC0415
+
+    run = last_run(log_files)
+    if run is None:
+        return "日志里没有启停记录（旧版程序不记录）", ""
+    started, ended = run["started"], run["ended"]
+    began = (
+        f"{local_time(started['timestamp'])} 启动（进程 {started.get('pid')}）" if started else ""
+    )
+    if ended is None:
+        return (
+            f"{began}，之后没有退出记录（窗口被直接关闭、进程被结束或仍在运行）",
+            "",
+        )
+    at = local_time(str(ended.get("timestamp", "")))
+    head = f"{began}，" if began else ""
+    if ended.get("event") == CRASHED:
+        stage = "启动时" if ended.get("stage") == "startup" else "运行中"
+        error = str(ended.get("error", ""))[:300]
+        if "Could not set lock" in error or "being used by another process" in error:
+            hint = "数据库被另一个 moneytool 进程占用：多半已经开着一个窗口，用那个即可，或全部关闭后再启动"
+        else:
+            hint = "完整错误见下方日志错误一节，处理后重新运行 start.bat"
+        return (
+            f"{head}{at} {stage}崩溃：{error}",
+            f"主程序上次{stage}失败（{at}）：{error}。{hint}",
+        )
+    return f"{head}{at} 正常退出", ""
+
+
 def stale_code(running_stamp: float | None) -> bool:
     """主程序记录的代码时间早于当前代码（旧版主程序不报时间，也按旧代码处理）。"""
     from moneytool.app import code_stamp  # noqa: PLC0415
@@ -210,6 +242,8 @@ def build_report(
         out.append(f"写锁持有者: {holder}，{state}")
     else:
         out.append("写锁持有者: 无")
+    last = describe_last_run(_log_files(settings, n=7))
+    out.append(f"上次运行: {last[0]}")
 
     section("数据库状态")
     summary: dict[str, Any] | None = None
@@ -239,6 +273,8 @@ def build_report(
                 if holder_alive
                 else f"主程序未运行（{web} 无响应），直接读取数据库。启动请双击 start.bat。"
             )
+            if not holder_alive and last[1]:
+                problems.append(last[1])
             try:
                 summary = db_summary(conn)
             finally:
