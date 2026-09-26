@@ -46,7 +46,7 @@ class _FailingEm:
     def __init__(self) -> None:
         self.calls = 0
 
-    def flow_daily_stock(self, code: str, day: dt.date) -> Any:
+    def flow_daily_stock(self, code: str, day: dt.date, limiter: Any = None) -> Any:
         self.calls += 1
         raise AdapterError("eastmoney", "flow_daily_stock", "ProxyError")
 

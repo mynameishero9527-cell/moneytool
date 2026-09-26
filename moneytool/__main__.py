@@ -268,7 +268,7 @@ def recompute(
 @app.command()
 def backfill(
     data_dir: DataDirOpt = None,
-    batch: Annotated[int, typer.Option(help="每批标的数")] = 50,
+    batch: Annotated[int | None, typer.Option(help="每批标的数（默认 [backfill] batch）")] = None,
     once: Annotated[bool, typer.Option("--once", help="只跑一批")] = False,
 ) -> None:
     """前台回补日线与日频资金流（主进程未运行时）。"""

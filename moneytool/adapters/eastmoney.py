@@ -15,6 +15,7 @@ from moneytool.adapters.base import (
     AdapterError,
     CaptchaError,
     FetchContext,
+    RateLimiter,
     code_to_em_market,
     is_captcha_like,
     normalize_code,
@@ -92,6 +93,7 @@ class EastmoneyAdapter:
         day: dt.date,
         per_stock: bool = False,
         cache: bool = True,
+        limiter: RateLimiter | None = None,
     ) -> pl.DataFrame:
         if cache:
             cached = self.ctx.cache.get(SOURCE, endpoint, day, params)
@@ -101,7 +103,7 @@ class EastmoneyAdapter:
             raise CaptchaError(SOURCE, endpoint, "当日已触发验证，个股级请求暂停")
 
         def once() -> pl.DataFrame:
-            (self.ctx.per_stock_limiter if per_stock else self.ctx.limiter).wait()
+            (limiter or (self.ctx.per_stock_limiter if per_stock else self.ctx.limiter)).wait()
             try:
                 raw = _pdf(call())
             except Exception as exc:
@@ -168,8 +170,12 @@ class EastmoneyAdapter:
 
     # ---- 资金流：日频正式值 ----
 
-    def flow_daily_stock(self, code: str, day: dt.date) -> pl.DataFrame:
-        """`stock_individual_fund_flow(stock, market)`：该股全部历史日频。个股级，限速 5 秒。"""
+    def flow_daily_stock(
+        self, code: str, day: dt.date, limiter: RateLimiter | None = None
+    ) -> pl.DataFrame:
+        """`stock_individual_fund_flow(stock, market)`：该股最近约 120 个交易日的日频。
+
+        个股级，默认按 `per_stock_interval_seconds` 限速；回补传入共享的自适应限速器。"""
         num, _ = code.split(".")
 
         def std(df: pl.DataFrame) -> pl.DataFrame:
@@ -191,6 +197,7 @@ class EastmoneyAdapter:
             std,
             day=day,
             per_stock=True,
+            limiter=limiter,
         )
 
     def flow_daily_sector(self, name: str, day: dt.date) -> pl.DataFrame:

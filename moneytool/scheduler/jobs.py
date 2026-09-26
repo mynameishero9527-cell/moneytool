@@ -6,23 +6,34 @@ import datetime as dt
 import threading
 import traceback
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import duckdb
 import polars as pl
 
-from moneytool.adapters.base import AdapterError
+from moneytool.adapters.base import AdapterError, AdaptiveLimiter
 from moneytool.app import AppContext, now_sh, today_sh
 from moneytool.compute.labels import compute_labels
 from moneytool.compute.pipeline import PipelineResult, run
-from moneytool.ingest.bars import backfill_bars, daily_bars_from_snapshot, update_float_mv
+from moneytool.ingest.bars import TASK as BARS_TASK
+from moneytool.ingest.bars import (
+    backfill_bars,
+    daily_bars_from_snapshot,
+    fetch_bars,
+    pending_codes,
+    store_bars,
+    update_float_mv,
+)
 from moneytool.ingest.flow import (
     CLOSE_SEGMENT,
-    backfill_flow,
+    TASK_FLOW,
     capture_segment,
     confirm_from_snapshot,
+    fetch_flow,
     rebuild_intraday,
     reconcile_sample,
+    store_flow,
 )
 from moneytool.ingest.reference import (
     sync_calendar,
@@ -58,6 +69,10 @@ class JobRunner:
         self.ctx = ctx
         self.stop_event = threading.Event()
         self.flow_paused_until: dt.datetime | None = None
+        cfg = ctx.settings.backfill
+        self.flow_limiter = AdaptiveLimiter(
+            cfg.flow_interval_seconds, cfg.flow_max_interval_seconds
+        )
 
     def run_job(
         self, name: str, fn: Callable[[duckdb.DuckDBPyConnection], Any], *, segment: str = ""
@@ -462,40 +477,61 @@ class JobRunner:
 
     # ---- 回补（后台线程，分批持锁） ----
 
-    def job_backfill_batch(self, batch: int = 50) -> tuple[int, int]:
+    def job_backfill_batch(self, batch: int | None = None) -> tuple[int, int]:
+        """日线（Baostock）与资金流（东财）两个源互不相干，各开一个线程同时拉；
+        网络请求都在写锁外进行，拉完一批才持锁写库，盘中任务不会被回补挡住。"""
         day = today_sh()
-        ad = self.ctx.adapters
-        s = self.ctx.settings.data
-        bars_start = day - dt.timedelta(days=365 * s.backfill_years_bars)
-        flow_since = day - dt.timedelta(days=365 * s.backfill_years_flow)
+        n = batch or self.ctx.settings.backfill.batch
+        with ThreadPoolExecutor(2, thread_name_prefix="backfill") as pool:
+            bars = pool.submit(self._backfill_bars_batch, day, n)
+            flow = None if self.flow_paused() else pool.submit(self._backfill_flow_batch, day, n)
+            return bars.result(), (flow.result() if flow else 0)
 
-        b = self.run_job(
-            "backfill",
-            lambda conn: backfill_bars(
-                conn,
-                ad,
-                start=bars_start,
+    def _pending(self, task: str, n: int) -> list[str]:
+        with self.ctx.db.read() as conn:
+            return pending_codes(conn, task)[:n]
+
+    def _backfill_bars_batch(self, day: dt.date, n: int) -> int:
+        todo = self._pending(BARS_TASK, n)
+        if not todo:
+            return 0
+        years = self.ctx.settings.data.backfill_years_bars
+        try:
+            results = fetch_bars(
+                self.ctx.adapters,
+                todo,
+                start=day - dt.timedelta(days=365 * years),
                 end=day,
                 day=day,
-                limit=batch,
                 should_stop=self.stop_event.is_set,
-            ),
-        )
-        f = 0
-        if not self.flow_paused():
-            f = self.run_job(
-                "backfill_flow",
-                lambda conn: backfill_flow(
-                    conn,
-                    ad,
-                    day=day,
-                    since=flow_since,
-                    limit=batch,
-                    should_stop=self.stop_event.is_set,
-                    on_stall=self._pause_flow,
-                ),
             )
-        return (b if isinstance(b, int) else 0), (f if isinstance(f, int) else 0)
+        except Exception as exc:
+            log.error("backfill_fetch_failed", task=BARS_TASK, error=str(exc))
+            return 0
+        out = self.run_job("backfill", lambda conn: store_bars(conn, results, day))
+        return out if isinstance(out, int) else 0
+
+    def _backfill_flow_batch(self, day: dt.date, n: int) -> int:
+        todo = self._pending(TASK_FLOW, n)
+        if not todo:
+            return 0
+        cfg = self.ctx.settings.backfill
+        since = day - dt.timedelta(days=365 * self.ctx.settings.data.backfill_years_flow)
+        try:
+            results = fetch_flow(
+                self.ctx.adapters,
+                todo,
+                day,
+                workers=cfg.flow_workers,
+                limiter=self.flow_limiter,
+                should_stop=self.stop_event.is_set,
+                on_stall=self._pause_flow,
+            )
+        except Exception as exc:
+            log.error("backfill_fetch_failed", task=TASK_FLOW, error=str(exc))
+            return 0
+        out = self.run_job("backfill_flow", lambda conn: store_flow(conn, results, day, since))
+        return out if isinstance(out, int) else 0
 
     def flow_paused(self) -> bool:
         return self.flow_paused_until is not None and now_sh() < self.flow_paused_until

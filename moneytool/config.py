@@ -80,6 +80,14 @@ class ScheduleConfig(BaseModel):
     catchup_min_coverage: float = 0.8  # 当日日线覆盖在市证券比例不足则不补算，避免用残缺数据出结论
 
 
+class BackfillConfig(BaseModel):
+    batch: int = 100  # 每批标的数，每批写库一次
+    # 东财个股资金流：多线程共享一个自适应限速器，成功时间隔逐步降到下限，失败翻倍直到上限
+    flow_workers: int = 2
+    flow_interval_seconds: float = 2.0
+    flow_max_interval_seconds: float = 10.0
+
+
 class NetworkConfig(BaseModel):
     # direct：数据源直连，不走系统 / 环境代理（数据源都在境内，代理常导致 ProxyError）
     # system：沿用系统代理；也可直接填代理地址，如 "http://127.0.0.1:7890"
@@ -92,6 +100,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="MONEYTOOL_", env_nested_delimiter="__")
 
     network: NetworkConfig = NetworkConfig()
+    backfill: BackfillConfig = BackfillConfig()
     server: ServerConfig = ServerConfig()
     data: DataConfig = DataConfig()
     rate_limit: RateLimitConfig = RateLimitConfig()
@@ -178,6 +187,13 @@ proxy = "direct"
 [data]
 backfill_years_flow = 2
 backfill_years_bars = 5
+
+[backfill]
+# 东财个股资金流回补：线程数与最小请求间隔（秒）。失败时间隔自动翻倍到上限，连续失败暂停 30 分钟；
+# 间隔调得过小，东财会直接断开连接（封 IP 一段时间），不建议低于 1.5
+flow_workers = 2
+flow_interval_seconds = 2.0
+flow_max_interval_seconds = 10.0
 
 [rate_limit.eastmoney]
 min_interval_seconds = 2.0

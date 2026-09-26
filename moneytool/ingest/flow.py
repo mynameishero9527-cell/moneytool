@@ -3,18 +3,20 @@
 - 分段：每段末拉「今日」全市场累计（个股 1 次 + 概念 1 次 + 东财行业 1 次），存 flow_snapshot，差分写 flow_intraday。
 - 收盘：15:00 后最后一次「今日」累计即当日正式值，写 flow_daily（reconciled=False）；
   夜间对候选名单 / 自选样本用个股日频接口对账，偏差写 data_quality，样本标 reconciled=True。
-- 回补：个股日频接口逐只，串行带间隔，进度写 backfill_progress。
+- 回补：个股日频接口（只有最近约 120 个交易日），小线程池并发、共享自适应限速，进度写 backfill_progress。
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 
 import duckdb
 import polars as pl
 
-from moneytool.adapters.base import AdapterError, CaptchaError
+from moneytool.adapters.base import AdapterError, AdaptiveLimiter, CaptchaError
 from moneytool.adapters.registry import Adapters
 from moneytool.compute.flow import FLOW_COLS, reconcile, segment_diff
 from moneytool.ingest.bars import mark_progress, pending_codes
@@ -255,37 +257,91 @@ def backfill_flow(
     should_stop: Callable[[], bool] | None = None,
     on_stall: Callable[[str], None] | None = None,
     max_consecutive_failures: int = 3,
+    workers: int = 1,
+    limiter: AdaptiveLimiter | None = None,
 ) -> int:
-    """逐只拉个股日频资金流写 flow_daily（reconciled=True，因为就是日频源）。
-
-    遇验证、或连续 `max_consecutive_failures` 只失败（多为代理 / 网络问题）即停止本轮，
-    通过 `on_stall(原因)` 通知调用方暂停，避免每只都走完重试退避、拖住整个回补。"""
+    """拉个股日频资金流写 flow_daily（reconciled=True，因为就是日频源）。返回完成的股票数。"""
     todo = codes if codes is not None else pending_codes(conn, TASK_FLOW)
     if limit is not None:
         todo = todo[:limit]
-    done = 0
+    results = fetch_flow(
+        ad,
+        todo,
+        day,
+        workers=workers,
+        limiter=limiter,
+        should_stop=should_stop,
+        on_stall=on_stall,
+        max_consecutive_failures=max_consecutive_failures,
+    )
+    return store_flow(conn, results, day, since)
+
+
+FlowResult = tuple[str, pl.DataFrame | AdapterError]
+
+
+def fetch_flow(
+    ad: Adapters,
+    codes: list[str],
+    day: dt.date,
+    *,
+    workers: int = 1,
+    limiter: AdaptiveLimiter | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    on_stall: Callable[[str], None] | None = None,
+    max_consecutive_failures: int = 3,
+) -> list[FlowResult]:
+    """只拉数据不写库（可在写锁外执行）。`workers` 个线程并发，请求节奏由共享的 `limiter` 控制。
+
+    遇验证、或连续 `max_consecutive_failures` 只失败（多为代理 / 网络问题）即停止本轮，
+    通过 `on_stall(原因)` 通知调用方暂停，避免每只都走完重试退避、拖住整个回补。"""
+    halt = threading.Event()
+    state_lock = threading.Lock()
     failures = 0
-    for code in todo:
-        if should_stop and should_stop():
-            break
+    stall: list[str] = []
+
+    def one(code: str) -> FlowResult | None:
+        nonlocal failures
+        if halt.is_set() or (should_stop and should_stop()):
+            return None
         try:
-            hist = ad.eastmoney.flow_daily_stock(code, day)
-        except CaptchaError as exc:
-            _quality(conn, "flow_daily_stock", day, "", exc)
-            if on_stall:
-                on_stall(f"触发验证：{exc}")
-            break
+            hist = ad.eastmoney.flow_daily_stock(code, day, limiter=limiter)
         except AdapterError as exc:
-            _quality(conn, "flow_daily_stock", day, "", exc)
-            mark_progress(conn, TASK_FLOW, code, "failed")
-            failures += 1
-            if failures >= max_consecutive_failures:
-                if on_stall:
-                    on_stall(f"连续 {failures} 只失败：{str(exc)[:200]}")
-                break
+            if limiter:
+                limiter.failed()
+            with state_lock:
+                failures += 1
+                if isinstance(exc, CaptchaError):
+                    stall.append(f"触发验证：{exc}")
+                    halt.set()
+                elif failures >= max_consecutive_failures and not halt.is_set():
+                    stall.append(f"连续 {failures} 只失败：{str(exc)[:200]}")
+                    halt.set()
+            return code, exc
+        if limiter:
+            limiter.succeeded()
+        with state_lock:
+            failures = 0
+        return code, hist
+
+    with ThreadPoolExecutor(max(1, workers), thread_name_prefix="flow-backfill") as pool:
+        fetched = list(pool.map(one, codes))
+    if stall and on_stall:
+        on_stall(stall[0])
+    return [r for r in fetched if r is not None]
+
+
+def store_flow(
+    conn: duckdb.DuckDBPyConnection, results: list[FlowResult], day: dt.date, since: dt.date
+) -> int:
+    done = 0
+    for code, res in results:
+        if isinstance(res, AdapterError):
+            _quality(conn, "flow_daily_stock", day, "", res)
+            if not isinstance(res, CaptchaError):
+                mark_progress(conn, TASK_FLOW, code, "failed")
             continue
-        failures = 0
-        hist = hist.filter(pl.col("trade_date") >= since)
+        hist = res.filter(pl.col("trade_date") >= since)
         if hist.is_empty():
             mark_progress(conn, TASK_FLOW, code, "done", None)
             continue

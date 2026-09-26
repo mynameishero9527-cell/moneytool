@@ -67,9 +67,11 @@ def bars_with_adjust(kdata: pl.DataFrame, adjust: pl.DataFrame) -> pl.DataFrame:
 
 
 def pending_codes(conn: duckdb.DuckDBPyConnection, task: str) -> list[str]:
+    """未完成的标的；失败过的排在后面，免得少数一直失败的股票占满每一批。"""
     rows = conn.execute(
         "SELECT s.code FROM security s LEFT JOIN backfill_progress p ON p.task = ? AND p.subject_id = s.code "
-        "WHERE (p.status IS NULL OR p.status <> 'done') AND NOT s.is_delisting ORDER BY s.code",
+        "WHERE (p.status IS NULL OR p.status <> 'done') AND NOT s.is_delisting "
+        "ORDER BY COALESCE(p.attempts, 0), s.code",
         [task],
     ).fetchall()
     return [r[0] for r in rows]
@@ -104,24 +106,53 @@ def backfill_bars(
     todo = codes if codes is not None else pending_codes(conn, TASK)
     if limit is not None:
         todo = todo[:limit]
-    done = 0
-    for code in todo:
+    return store_bars(
+        conn, fetch_bars(ad, todo, start=start, end=end, day=day, should_stop=should_stop), day
+    )
+
+
+BarsResult = tuple[str, tuple[pl.DataFrame, pl.DataFrame] | AdapterError]
+
+
+def fetch_bars(
+    ad: Adapters,
+    codes: list[str],
+    *,
+    start: dt.date,
+    end: dt.date,
+    day: dt.date,
+    should_stop: Callable[[], bool] | None = None,
+) -> list[BarsResult]:
+    """只拉数据不写库（可在写锁外执行）。Baostock 会话不支持并发，逐只顺序拉。"""
+    out: list[BarsResult] = []
+    for code in codes:
         if should_stop and should_stop():
             break
         try:
             k = ad.baostock.kdata(code, start, end, day)
             adj = ad.baostock.adjust_factor(code, start, end, day)
         except AdapterError as exc:
+            out.append((code, exc))
+            continue
+        out.append((code, (k, adj)))
+    return out
+
+
+def store_bars(conn: duckdb.DuckDBPyConnection, results: list[BarsResult], day: dt.date) -> int:
+    done = 0
+    for code, res in results:
+        if isinstance(res, AdapterError):
             record_quality(
                 conn,
                 source="baostock",
                 endpoint="kdata",
                 trade_date=day,
                 status=QualityStatus.MISSING,
-                reason=str(exc),
+                reason=str(res),
             )
             mark_progress(conn, TASK, code, "failed")
             continue
+        k, adj = res
         if k.is_empty():
             mark_progress(conn, TASK, code, "done", None)
             continue

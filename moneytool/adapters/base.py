@@ -76,6 +76,23 @@ class RateLimiter:
             self._last = time.monotonic()
 
 
+class AdaptiveLimiter(RateLimiter):
+    """多线程共享的限速器：成功一次间隔缩 10%（不低于 floor），失败一次翻倍（不高于 ceiling）。"""
+
+    def __init__(self, floor: float, ceiling: float) -> None:
+        super().__init__(floor)
+        self.floor = floor
+        self.ceiling = max(ceiling, floor)
+
+    def succeeded(self) -> None:
+        with self._lock:
+            self.min_interval = max(self.floor, self.min_interval * 0.9)
+
+    def failed(self) -> None:
+        with self._lock:
+            self.min_interval = min(self.ceiling, max(self.min_interval, 0.5) * 2)
+
+
 @dataclass
 class RawCache:
     """原始响应只追加落盘：raw/{source}/{endpoint}/{date}/{params_hash}.parquet + _meta.json。"""
