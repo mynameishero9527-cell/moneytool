@@ -249,7 +249,9 @@ class JobRunner:
         out: list[dt.date] = []
         need = s.catchup_min_coverage * total[0]
         restated = set(restated_dates(conn))
+        has_members = conn.execute("SELECT 1 FROM sector_member_snapshot LIMIT 1").fetchone()
         for (d,) in sorted(rows):
+            version = self.ctx.params_for(d).version
             cov = conn.execute(
                 "SELECT (SELECT count(*) FROM bar_daily WHERE trade_date = ?), "
                 "(SELECT count(*) FROM flow_daily WHERE trade_date = ?)",
@@ -260,11 +262,21 @@ class JobRunner:
             prev = conn.execute(
                 "SELECT data_status FROM market_daily WHERE trade_date = ? AND segment = 'close' "
                 "AND param_version = ? LIMIT 1",
-                [d, self.ctx.params_for(d).version],
+                [d, version],
             ).fetchone()
             if prev is not None:
                 # 先前资金流全缺按价格模式算过、或当时用的是收盘快照近似值，后来有了日频正式值则重算
                 if cov[1] >= need and (prev[0] == DataStatus.DEGRADED.value or d in restated):
+                    out.append(d)
+                elif (
+                    has_members
+                    and not conn.execute(
+                        "SELECT 1 FROM sector_stage_confirmed WHERE trade_date = ? AND param_version = ? "
+                        "LIMIT 1",
+                        [d, version],
+                    ).fetchone()
+                ):
+                    # 旧版本在首次成分快照之前的日子取不到成分，板块结果为空，补上
                     out.append(d)
                 continue
             # 资金流部分到位时板块合计会失真，等回补完；全缺则走价格模式（结果标降级）

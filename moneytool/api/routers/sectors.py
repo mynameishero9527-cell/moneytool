@@ -18,6 +18,7 @@ from moneytool.api.deps import (
     stage_table,
 )
 from moneytool.api.schemas import Envelope
+from moneytool.ingest.reference import SNAPSHOT_AS_OF
 from moneytool.types import STAGE_PRIORITY, Stage
 
 router = APIRouter(prefix="/sectors")
@@ -206,10 +207,10 @@ def detail(
     _trim_features(child_rows)
 
     members = conn.execute(
-        """
+        f"""
         WITH latest AS (
-            SELECT max(snapshot_date) AS snapshot_date FROM sector_member_snapshot
-            WHERE sector_id = ? AND snapshot_date <= ?
+            SELECT {SNAPSHOT_AS_OF} AS snapshot_date FROM sector_member_snapshot
+            WHERE sector_id = ?
         )
         SELECT m.code, s.name, s.is_st, f.net_main, f.main_ratio, f.pct_chg, f.close, f.reconciled,
                b.amount, b.turnover, feat.features
@@ -223,7 +224,7 @@ def detail(
         WHERE m.sector_id = ?
         ORDER BY f.net_main DESC NULLS LAST
         """,
-        [sector_id, day, day, day, day, segment or "close", meta.param_version, sector_id],
+        [day, sector_id, day, day, day, segment or "close", meta.param_version, sector_id],
     ).pl()
     member_rows = rows(members, ("features",))
     for m in member_rows:

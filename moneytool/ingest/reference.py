@@ -224,10 +224,17 @@ def sync_concepts(
     return store_concepts(conn, fetch_concepts(ad, day, max_boards=max_boards), day)
 
 
+# 免费源拿不到历史成分，首次同步前的日子只能沿用最早一次快照，否则回补的历史日期板块全空
+SNAPSHOT_AS_OF = (
+    "coalesce(max(snapshot_date) FILTER (WHERE snapshot_date <= ?), min(snapshot_date))"
+)
+
+
 def members_as_of(
     conn: duckdb.DuckDBPyConnection, trade_date: dt.date, levels: tuple[str, ...] | None = None
 ) -> pl.DataFrame:
-    """某日生效成分：每个板块取 ≤ 目标日的最近一次快照。返回 (sector_id, code, trade_date, level, first_seen)。"""
+    """某日生效成分：每个板块取 ≤ 目标日的最近一次快照（目标日早于首次快照时取最早一次）。
+    返回 (sector_id, code, trade_date, level, first_seen)。"""
     level_filter = ""
     params: list[object] = [trade_date, trade_date]
     if levels:
@@ -236,8 +243,8 @@ def members_as_of(
         params.extend(levels)
     sql = f"""
         WITH latest AS (
-            SELECT sector_id, max(snapshot_date) AS snapshot_date
-            FROM sector_member_snapshot WHERE snapshot_date <= ? GROUP BY sector_id
+            SELECT sector_id, {SNAPSHOT_AS_OF} AS snapshot_date
+            FROM sector_member_snapshot GROUP BY sector_id
         ),
         first_seen AS (
             SELECT sector_id, code, min(snapshot_date) AS first_seen FROM sector_member_snapshot GROUP BY sector_id, code

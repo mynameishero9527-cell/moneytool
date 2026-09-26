@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from moneytool.api.deps import get_ro_conn, make_meta, resolve_trade_date, rows
 from moneytool.api.routers.sectors import features_of
 from moneytool.api.schemas import Envelope
+from moneytool.ingest.reference import SNAPSHOT_AS_OF
 
 router = APIRouter(prefix="/stocks")
 
@@ -33,10 +34,10 @@ def detail(
     if day is None:
         return Envelope(meta=meta, data={"security": security})
     sectors = conn.execute(
-        """
+        f"""
         WITH latest AS (
-            SELECT sector_id, max(snapshot_date) AS snapshot_date FROM sector_member_snapshot
-            WHERE snapshot_date <= ? GROUP BY sector_id
+            SELECT sector_id, {SNAPSHOT_AS_OF} AS snapshot_date FROM sector_member_snapshot
+            GROUP BY sector_id
         )
         SELECT sec.sector_id, sec.name, sec.level, st.stage, st.days_in_stage
         FROM sector_member_snapshot m JOIN latest USING (sector_id, snapshot_date)

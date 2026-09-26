@@ -58,6 +58,27 @@ def test_run_job_waits_for_lock(ctx: AppContext) -> None:
     assert runner.run_job("after", lambda conn: 1) == 1
 
 
+def test_days_before_first_member_snapshot_get_sectors(ctx: AppContext) -> None:
+    dates = seed_market(ctx.db, n_days=70, n_sectors=3, per_sector=10)
+    with ctx.db.write() as conn:
+        conn.execute(
+            "UPDATE sector_member_snapshot SET snapshot_date = ?",
+            [dates[-1] + dt.timedelta(days=2)],
+        )
+    ctx.settings.schedule.catchup_days = 3
+    runner = JobRunner(ctx)
+    assert runner.job_catchup() == 3
+    with ctx.db.read() as conn:
+        n = conn.execute("SELECT count(DISTINCT trade_date) FROM sector_stage_confirmed").fetchone()
+        assert n == (3,)
+        conn_day = dates[-1] + dt.timedelta(days=1)
+        assert runner.catchup_days(conn, conn_day) == []
+    with ctx.db.write() as conn:
+        conn.execute("DELETE FROM sector_stage_confirmed WHERE trade_date = ?", [dates[-2]])
+    with ctx.db.read() as conn:
+        assert runner.catchup_days(conn, conn_day) == [dates[-2]]
+
+
 def test_run_store_waits_instead_of_dropping(
     ctx: AppContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
