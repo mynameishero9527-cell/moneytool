@@ -61,7 +61,9 @@ class _SlowEm:
         self.peak = 0
         self._lock = threading.Lock()
 
-    def flow_daily_stock(self, code: str, day: dt.date, limiter: Any = None) -> pl.DataFrame:
+    def flow_daily_stock(
+        self, code: str, day: dt.date, limiter: Any = None, **kw: Any
+    ) -> pl.DataFrame:
         if limiter is not None:
             limiter.wait()
         with self._lock:

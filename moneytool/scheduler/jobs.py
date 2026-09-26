@@ -60,6 +60,7 @@ from moneytool.types import DataStatus, QualityStatus
 
 log = get_logger(__name__)
 FLOW_PAUSE_MINUTES = 30
+FLOW_PAUSE_MAX_MINUTES = 240
 
 
 class JobRunner:
@@ -69,6 +70,7 @@ class JobRunner:
         self.ctx = ctx
         self.stop_event = threading.Event()
         self.flow_paused_until: dt.datetime | None = None
+        self.flow_pause_streak = 0
         cfg = ctx.settings.backfill
         self.flow_limiter = AdaptiveLimiter(
             cfg.flow_interval_seconds, cfg.flow_max_interval_seconds
@@ -530,6 +532,8 @@ class JobRunner:
         except Exception as exc:
             log.error("backfill_fetch_failed", task=TASK_FLOW, error=str(exc))
             return 0
+        if any(not isinstance(r, AdapterError) for _, r in results):
+            self.flow_pause_streak = 0
         out = self.run_job("backfill_flow", lambda conn: store_flow(conn, results, day, since))
         return out if isinstance(out, int) else 0
 
@@ -537,10 +541,15 @@ class JobRunner:
         return self.flow_paused_until is not None and now_sh() < self.flow_paused_until
 
     def _pause_flow(self, reason: str) -> None:
-        self.flow_paused_until = now_sh() + dt.timedelta(minutes=FLOW_PAUSE_MINUTES)
+        """东财封 IP 通常持续几十分钟到数小时：连续暂停时时长翻倍（30 → 60 → 120 … 最长 4 小时），
+        期间一个请求都不发，等封禁自然解除；恢复后有成功请求即重置。"""
+        minutes = min(FLOW_PAUSE_MINUTES * 2**self.flow_pause_streak, FLOW_PAUSE_MAX_MINUTES)
+        self.flow_pause_streak += 1
+        self.flow_paused_until = now_sh() + dt.timedelta(minutes=minutes)
         log.warning(
             "backfill_flow_paused",
             reason=reason,
+            minutes=minutes,
             until=self.flow_paused_until.isoformat(timespec="minutes"),
         )
 

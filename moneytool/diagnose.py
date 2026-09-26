@@ -300,6 +300,19 @@ def build_report(
                         f'数据源 {h["source"]} 被代理拦截：把 config.toml 的 [network] proxy 设为 "direct"'
                         "（默认值），或关闭 VPN / 代理软件的系统代理后重启程序"
                     )
+                elif h["source"].startswith("eastmoney") and (
+                    "RemoteDisconnected" in err or "502" in err
+                ):
+                    problems.append(
+                        f"数据源 {h['source']} 断开连接：通常是请求过于频繁、本机 IP 被东财临时封禁"
+                        "（可持续数十分钟到数小时）。程序会自动暂停并逐次延长间隔，无需操作；"
+                        "若反复出现，调大 config.toml 的 [backfill] flow_interval_seconds"
+                    )
+                elif h["source"] == "eastmoney实时":
+                    problems.append(
+                        "东财实时排名接口（push2.eastmoney.com）不可用：盘中分段与收盘快照会缺失，"
+                        f"历史日频回补不受影响。错误：{err[:120]}"
+                    )
                 else:
                     problems.append(f"数据源 {h['source']} 连不上：{err[:120]}")
         drift = clock_drift_seconds(ad)

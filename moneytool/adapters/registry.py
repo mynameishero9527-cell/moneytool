@@ -35,7 +35,9 @@ class Adapters:
 
     def health(self, day: dt.date | None = None) -> list[dict[str, Any]]:
         day = day or dt.date.today()
-        return [a.health(day) for a in (self.eastmoney, self.baostock, self.shenwan, self.csindex)]
+        out = [a.health(day) for a in (self.eastmoney, self.baostock, self.shenwan, self.csindex)]
+        out.insert(1, self.eastmoney.health_realtime(day))
+        return out
 
 
 def build_adapters(settings: Settings) -> Adapters:

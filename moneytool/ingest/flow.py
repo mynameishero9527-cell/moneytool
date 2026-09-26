@@ -305,7 +305,7 @@ def fetch_flow(
         if halt.is_set() or (should_stop and should_stop()):
             return None
         try:
-            hist = ad.eastmoney.flow_daily_stock(code, day, limiter=limiter)
+            hist = ad.eastmoney.flow_daily_stock(code, day, limiter=limiter, retries=False)
         except AdapterError as exc:
             if limiter:
                 limiter.failed()

@@ -94,6 +94,7 @@ class EastmoneyAdapter:
         per_stock: bool = False,
         cache: bool = True,
         limiter: RateLimiter | None = None,
+        retries: bool = True,
     ) -> pl.DataFrame:
         if cache:
             cached = self.ctx.cache.get(SOURCE, endpoint, day, params)
@@ -108,7 +109,8 @@ class EastmoneyAdapter:
                 raw = _pdf(call())
             except Exception as exc:
                 if is_captcha_like(exc):
-                    self.ctx.captcha_tripped[SOURCE] = day
+                    if per_stock:  # 全市场接口返回异常不代表个股接口被拦，不连带停掉回补
+                        self.ctx.captcha_tripped[SOURCE] = day
                     raise CaptchaError(
                         SOURCE, endpoint, f"疑似验证拦截: {type(exc).__name__}"
                     ) from exc
@@ -117,7 +119,8 @@ class EastmoneyAdapter:
                 raise AdapterError(SOURCE, endpoint, "空响应")
             return raw
 
-        raw = retry(once, source=SOURCE, endpoint=endpoint, backoff=self.ctx.rate.backoff_seconds)
+        backoff = self.ctx.rate.backoff_seconds if retries else ()
+        raw = retry(once, source=SOURCE, endpoint=endpoint, backoff=backoff)
         self.ctx.cache.put(
             SOURCE, endpoint, day, params, raw, {"source": SOURCE, "endpoint": endpoint}
         )
@@ -148,7 +151,9 @@ class EastmoneyAdapter:
             day=day,
         )
 
-    def flow_rank_sector(self, day: dt.date, segment: str, sector_type: str) -> pl.DataFrame:
+    def flow_rank_sector(
+        self, day: dt.date, segment: str, sector_type: str, *, cache: bool = True
+    ) -> pl.DataFrame:
         """`stock_sector_fund_flow_rank(indicator="今日", sector_type=...)`；`sector_type` ∈ 行业资金流 / 概念资金流。"""
 
         def std(df: pl.DataFrame) -> pl.DataFrame:
@@ -166,16 +171,23 @@ class EastmoneyAdapter:
             lambda: self.ak.stock_sector_fund_flow_rank(indicator="今日", sector_type=sector_type),
             std,
             day=day,
+            cache=cache,
         )
 
     # ---- 资金流：日频正式值 ----
 
     def flow_daily_stock(
-        self, code: str, day: dt.date, limiter: RateLimiter | None = None
+        self,
+        code: str,
+        day: dt.date,
+        limiter: RateLimiter | None = None,
+        *,
+        retries: bool = True,
     ) -> pl.DataFrame:
         """`stock_individual_fund_flow(stock, market)`：该股最近约 120 个交易日的日频。
 
-        个股级，默认按 `per_stock_interval_seconds` 限速；回补传入共享的自适应限速器。"""
+        个股级，默认按 `per_stock_interval_seconds` 限速；回补传入共享的自适应限速器且不重试
+        （东财限流时重试只会加重封禁，失败的股票留给下一批）。"""
         num, _ = code.split(".")
 
         def std(df: pl.DataFrame) -> pl.DataFrame:
@@ -198,6 +210,7 @@ class EastmoneyAdapter:
             day=day,
             per_stock=True,
             limiter=limiter,
+            retries=retries,
         )
 
     def flow_daily_sector(self, name: str, day: dt.date) -> pl.DataFrame:
@@ -342,6 +355,28 @@ class EastmoneyAdapter:
             return {
                 "source": SOURCE,
                 "endpoint": "flow_market",
+                "ok": False,
+                "error": str(exc),
+                "ms": _ms(started),
+            }
+
+    def health_realtime(self, day: dt.date) -> dict[str, Any]:
+        """doctor 用：盘中分段依赖的全市场排名接口（push2 域名，与日频接口的 push2his 不同）。"""
+        started = dt.datetime.now()
+        endpoint = "flow_rank_sector"
+        try:
+            df = self.flow_rank_sector(day, "doctor", "行业资金流", cache=False)
+            return {
+                "source": "eastmoney实时",
+                "endpoint": endpoint,
+                "ok": True,
+                "rows": df.height,
+                "ms": _ms(started),
+            }
+        except AdapterError as exc:
+            return {
+                "source": "eastmoney实时",
+                "endpoint": endpoint,
                 "ok": False,
                 "error": str(exc),
                 "ms": _ms(started),

@@ -46,7 +46,7 @@ class _FailingEm:
     def __init__(self) -> None:
         self.calls = 0
 
-    def flow_daily_stock(self, code: str, day: dt.date, limiter: Any = None) -> Any:
+    def flow_daily_stock(self, code: str, day: dt.date, limiter: Any = None, **kw: Any) -> Any:
         self.calls += 1
         raise AdapterError("eastmoney", "flow_daily_stock", "ProxyError")
 
@@ -77,6 +77,18 @@ def test_runner_pauses_flow_and_skips_it(tmp_data_dir: Path) -> None:
     assert not runner.flow_paused()
     runner._pause_flow("连续 3 只失败")
     assert runner.flow_paused()
+    first = runner.flow_paused_until
+    runner._pause_flow("连续 3 只失败")
+    runner._pause_flow("连续 3 只失败")
+    assert first is not None and runner.flow_paused_until is not None
+    assert (runner.flow_paused_until - first).total_seconds() == pytest.approx(
+        90 * 60, abs=5
+    )  # 30 → 120 分钟
+    for _ in range(5):
+        runner._pause_flow("连续 3 只失败")
+    assert runner.flow_paused_until <= dt.datetime.now(
+        runner.flow_paused_until.tzinfo
+    ) + dt.timedelta(minutes=241)
     ctx.close()
 
 

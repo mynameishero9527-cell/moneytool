@@ -83,9 +83,9 @@ class ScheduleConfig(BaseModel):
 class BackfillConfig(BaseModel):
     batch: int = 100  # 每批标的数，每批写库一次
     # 东财个股资金流：多线程共享一个自适应限速器，成功时间隔逐步降到下限，失败翻倍直到上限
-    flow_workers: int = 2
-    flow_interval_seconds: float = 2.0
-    flow_max_interval_seconds: float = 10.0
+    flow_workers: int = 1
+    flow_interval_seconds: float = 3.0
+    flow_max_interval_seconds: float = 30.0
 
 
 class NetworkConfig(BaseModel):
@@ -189,11 +189,11 @@ backfill_years_flow = 2
 backfill_years_bars = 5
 
 [backfill]
-# 东财个股资金流回补：线程数与最小请求间隔（秒）。失败时间隔自动翻倍到上限，连续失败暂停 30 分钟；
-# 间隔调得过小，东财会直接断开连接（封 IP 一段时间），不建议低于 1.5
-flow_workers = 2
-flow_interval_seconds = 2.0
-flow_max_interval_seconds = 10.0
+# 东财个股资金流回补：线程数与最小请求间隔（秒）。失败时间隔自动翻倍到上限，连续失败暂停 30 分钟起、逐次翻倍到 4 小时；
+# 间隔过小或线程过多，东财会断开连接并封 IP（实测十几分钟以上），不建议低于 2 秒
+flow_workers = 1
+flow_interval_seconds = 3.0
+flow_max_interval_seconds = 30.0
 
 [rate_limit.eastmoney]
 min_interval_seconds = 2.0

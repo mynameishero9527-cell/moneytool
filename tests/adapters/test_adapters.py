@@ -73,6 +73,8 @@ class FakeAk:
 
     def stock_individual_fund_flow(self, stock: str, market: str) -> pd.DataFrame:
         self.calls += 1
+        if self.fail_json:
+            raise json.JSONDecodeError("Expecting value", "", 0)
         return pd.DataFrame(
             {
                 "日期": ["2026-09-23", "2026-09-24"],
@@ -142,9 +144,13 @@ def test_captcha_trips_and_blocks_per_stock(tmp_path: Path) -> None:
     with pytest.raises(CaptchaError):
         ad.flow_rank_stock(D, "0930_1030")
     assert ak.calls == 1  # 不重试
-    with pytest.raises(CaptchaError, match="暂停"):
+    assert not c.captcha_blocked("eastmoney", D)  # 全市场接口异常不连带停掉个股接口
+    with pytest.raises(CaptchaError, match="疑似验证"):
         ad.flow_daily_stock("000001.SZ", D)
-    assert ak.calls == 1
+    assert ak.calls == 2
+    with pytest.raises(CaptchaError, match="暂停"):
+        ad.flow_daily_stock("000002.SZ", D)
+    assert ak.calls == 2
 
 
 def test_flow_daily_stock(tmp_path: Path) -> None:

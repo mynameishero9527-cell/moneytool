@@ -31,7 +31,7 @@ python -m moneytool run
 
 Windows 没有 `make`，`make check` 对应的命令为 `ruff check . ; ruff format --check . ; mypy moneytool ; pytest -q -m "not network"`，重新构建前端用 `python scripts/build_frontend.py`。
 
-数据目录默认在项目目录下 `data/`（配置、数据库、日志、原始缓存、备份都在这里，已在 `.gitignore` 中），可用 `--data-dir` 或环境变量 `MONEYTOOL_DATA__DIR` 改到别处。旧版默认目录 `~/.moneytool` 里有数据且新目录还没有数据库时，`init` / `run` 会把它整体搬过来并删除旧目录；旧程序仍在运行时会提示先关闭。首次运行会先同步证券列表、交易日历与申万 / 中证成分，再在后台回补 5 年日线与日频资金流，进度见「数据状态」页。日线（Baostock）与资金流（东方财富）两路同时拉取，网络请求不占写库锁；东方财富个股资金流接口只提供最近约 120 个交易日，默认 2 个线程、每 2 秒一只，全市场约 3 小时（见 `[backfill]`），可让程序整夜运行；回补期间页面暂无结果。回补完成后自动补算最近 60 个交易日（`[schedule] catchup_days`），之后每个交易日收盘后自动更新。
+数据目录默认在项目目录下 `data/`（配置、数据库、日志、原始缓存、备份都在这里，已在 `.gitignore` 中），可用 `--data-dir` 或环境变量 `MONEYTOOL_DATA__DIR` 改到别处。旧版默认目录 `~/.moneytool` 里有数据且新目录还没有数据库时，`init` / `run` 会把它整体搬过来并删除旧目录；旧程序仍在运行时会提示先关闭。首次运行会先同步证券列表、交易日历与申万 / 中证成分，再在后台回补 5 年日线与日频资金流，进度见「数据状态」页。日线（Baostock）与资金流（东方财富）两路同时拉取，网络请求不占写库锁；东方财富个股资金流接口只提供最近约 120 个交易日，默认每 3 秒一只，全市场约 4.5 小时（见 `[backfill]`），可让程序整夜运行；回补期间页面暂无结果。回补完成后自动补算最近 60 个交易日（`[schedule] catchup_days`），之后每个交易日收盘后自动更新。
 
 常用命令：
 
@@ -80,12 +80,12 @@ proxy = "direct"               # direct：数据源直连，忽略 VPN / 代理�
 
 [backfill]
 batch = 100                    # 每批标的数，每批写库一次
-flow_workers = 2               # 东财资金流并发线程数
-flow_interval_seconds = 2.0    # 最小请求间隔；过小东财会断开连接、封 IP 一段时间，不建议低于 1.5
-flow_max_interval_seconds = 10.0
+flow_workers = 1               # 东财资金流并发线程数
+flow_interval_seconds = 3.0    # 最小请求间隔；过小或线程过多东财会断开连接并封 IP，不建议低于 2
+flow_max_interval_seconds = 30.0
 ```
 
-东方财富请求失败时间隔自动翻倍（最多到上限），成功后逐步恢复；连续 3 只个股失败（多为代理拦截或限流）时，资金流回补暂停 30 分钟再试，日线回补不受影响。Baostock 查询带超时（`[rate_limit.baostock] timeout_seconds`），连接卡住或被断开时自动重新登录，不会让回补线程一直挂住。`doctor.bat` 的「数据源连通」一节会指出被代理拦截的数据源。
+东方财富请求失败时间隔自动翻倍（最多到上限），成功后逐步恢复；连续 3 只个股失败（多为代理拦截或被东财封 IP，日志表现为 `RemoteDisconnected`）时，资金流回补暂停 30 分钟再试，再失败则暂停时长逐次翻倍到 4 小时，期间不发任何请求；回补的个股请求失败不重试，留给下一批；日线回补不受影响。发往东方财富的请求会自动补上浏览器 Referer 请求头。Baostock 查询带超时（`[rate_limit.baostock] timeout_seconds`），连接卡住或被断开时自动重新登录，不会让回补线程一直挂住。`doctor.bat` 的「数据源连通」一节会指出被代理拦截的数据源。
 
 ## 开发
 
