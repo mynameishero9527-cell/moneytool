@@ -45,9 +45,10 @@ from moneytool.storage.repo import (
     setting_set,
     upsert,
 )
-from moneytool.types import QualityStatus
+from moneytool.types import DataStatus, QualityStatus
 
 log = get_logger(__name__)
+FLOW_PAUSE_MINUTES = 30
 
 
 class JobRunner:
@@ -56,6 +57,7 @@ class JobRunner:
     def __init__(self, ctx: AppContext) -> None:
         self.ctx = ctx
         self.stop_event = threading.Event()
+        self.flow_paused_until: dt.datetime | None = None
 
     def run_job(
         self, name: str, fn: Callable[[duckdb.DuckDBPyConnection], Any], *, segment: str = ""
@@ -141,14 +143,17 @@ class JobRunner:
         day = today_sh()
         with self.ctx.db.read() as conn:
             stale = reference_stale(conn, day)
-            no_concepts = not conn.execute(
-                "SELECT 1 FROM sector WHERE level = 'concept' LIMIT 1"
-            ).fetchone()
         if stale:
             self.job_reference_sync(day)
-        if no_concepts:
-            self.run_job("concept_sync", lambda conn: self._sync_concepts(conn, day))
         self.job_catchup()
+
+    def _concepts_if_empty(self) -> None:
+        """概念成分走东财、逐板块拉，放在回补空闲时做，不挡住启动后的日线回补。"""
+        day = today_sh()
+        with self.ctx.db.read() as conn:
+            has = conn.execute("SELECT 1 FROM sector WHERE level = 'concept' LIMIT 1").fetchone()
+        if not has:
+            self.run_job("concept_sync", lambda conn: self._sync_concepts(conn, day))
 
     def _sync_concepts(self, conn: duckdb.DuckDBPyConnection, day: dt.date) -> int:
         try:
@@ -176,14 +181,8 @@ class JobRunner:
         if not rows or not total or total[0] == 0:
             return []
         out: list[dt.date] = []
+        need = s.catchup_min_coverage * total[0]
         for (d,) in sorted(rows):
-            done = conn.execute(
-                "SELECT 1 FROM market_daily WHERE trade_date = ? AND segment = 'close' "
-                "AND param_version = ? LIMIT 1",
-                [d, self.ctx.params_for(d).version],
-            ).fetchone()
-            if done:
-                continue
             cov = conn.execute(
                 "SELECT (SELECT count(*) FROM bar_daily WHERE trade_date = ?), "
                 "(SELECT count(*) FROM flow_daily WHERE trade_date = ?)",
@@ -191,7 +190,16 @@ class JobRunner:
             ).fetchone()
             if cov is None:
                 continue
-            need = s.catchup_min_coverage * total[0]
+            prev = conn.execute(
+                "SELECT data_status FROM market_daily WHERE trade_date = ? AND segment = 'close' "
+                "AND param_version = ? LIMIT 1",
+                [d, self.ctx.params_for(d).version],
+            ).fetchone()
+            if prev is not None:
+                # 先前资金流全缺按价格模式算过，资金流后来补齐则重算
+                if prev[0] == DataStatus.DEGRADED.value and cov[1] >= need:
+                    out.append(d)
+                continue
             # 资金流部分到位时板块合计会失真，等回补完；全缺则走价格模式（结果标降级）
             if cov[0] >= need and (cov[1] == 0 or cov[1] >= need):
                 out.append(d)
@@ -461,8 +469,9 @@ class JobRunner:
         bars_start = day - dt.timedelta(days=365 * s.backfill_years_bars)
         flow_since = day - dt.timedelta(days=365 * s.backfill_years_flow)
 
-        def work(conn: duckdb.DuckDBPyConnection) -> tuple[int, int]:
-            b = backfill_bars(
+        b = self.run_job(
+            "backfill",
+            lambda conn: backfill_bars(
                 conn,
                 ad,
                 start=bars_start,
@@ -470,23 +479,48 @@ class JobRunner:
                 day=day,
                 limit=batch,
                 should_stop=self.stop_event.is_set,
+            ),
+        )
+        f = 0
+        if not self.flow_paused():
+            f = self.run_job(
+                "backfill_flow",
+                lambda conn: backfill_flow(
+                    conn,
+                    ad,
+                    day=day,
+                    since=flow_since,
+                    limit=batch,
+                    should_stop=self.stop_event.is_set,
+                    on_stall=self._pause_flow,
+                ),
             )
-            f = backfill_flow(
-                conn, ad, day=day, since=flow_since, limit=batch, should_stop=self.stop_event.is_set
-            )
-            return b, f
+        return (b if isinstance(b, int) else 0), (f if isinstance(f, int) else 0)
 
-        out = self.run_job("backfill", work)
-        return out if isinstance(out, tuple) else (0, 0)
+    def flow_paused(self) -> bool:
+        return self.flow_paused_until is not None and now_sh() < self.flow_paused_until
+
+    def _pause_flow(self, reason: str) -> None:
+        self.flow_paused_until = now_sh() + dt.timedelta(minutes=FLOW_PAUSE_MINUTES)
+        log.warning(
+            "backfill_flow_paused",
+            reason=reason,
+            until=self.flow_paused_until.isoformat(timespec="minutes"),
+        )
 
     def backfill_loop(self) -> None:
         """后台循环：先做启动自检（参考数据 → 补算），再分批回补；分批释放锁让盘中任务插队。
-        一轮没有新进展即视为回补完成（或被限流暂停），随即补算缺失的收盘结果。"""
+        一轮没有新进展即视为回补完成，随即同步概念成分（首次）并补算缺失的收盘结果；
+        资金流因东财不可用而暂停期间不补算，免得整段历史都落成价格模式。"""
         self.job_startup_check()
         while not self.stop_event.is_set():
             b, f = self.job_backfill_batch()
             if b == 0 and f == 0:
+                if self.flow_paused():
+                    self.stop_event.wait(60)
+                    continue
                 log.info("backfill_idle")
+                self._concepts_if_empty()
                 self.job_catchup()
                 self.stop_event.wait(1800)
             else:
@@ -505,12 +539,16 @@ def clock_drift_seconds(ad: Any) -> float | None:
     try:
         import httpx  # noqa: PLC0415
 
+        started = dt.datetime.now(dt.UTC)
         r = httpx.head("https://quote.eastmoney.com/", timeout=5.0)
+        local = started + (dt.datetime.now(dt.UTC) - started) / 2
         server = r.headers.get("date")
         if not server:
             return None
         from email.utils import parsedate_to_datetime  # noqa: PLC0415
 
-        return (dt.datetime.now(dt.UTC) - parsedate_to_datetime(server)).total_seconds()
+        # 该页走 CDN 缓存，Date 是源站生成时间；加上 Age（在缓存中停留的秒数）才是当前服务器时间
+        age = float(r.headers.get("age") or 0)
+        return (local - parsedate_to_datetime(server)).total_seconds() - age
     except Exception:
         return None

@@ -253,12 +253,18 @@ def backfill_flow(
     codes: list[str] | None = None,
     limit: int | None = None,
     should_stop: Callable[[], bool] | None = None,
+    on_stall: Callable[[str], None] | None = None,
+    max_consecutive_failures: int = 3,
 ) -> int:
-    """逐只拉个股日频资金流写 flow_daily（reconciled=True，因为就是日频源）。遇验证停止。"""
+    """逐只拉个股日频资金流写 flow_daily（reconciled=True，因为就是日频源）。
+
+    遇验证、或连续 `max_consecutive_failures` 只失败（多为代理 / 网络问题）即停止本轮，
+    通过 `on_stall(原因)` 通知调用方暂停，避免每只都走完重试退避、拖住整个回补。"""
     todo = codes if codes is not None else pending_codes(conn, TASK_FLOW)
     if limit is not None:
         todo = todo[:limit]
     done = 0
+    failures = 0
     for code in todo:
         if should_stop and should_stop():
             break
@@ -266,11 +272,19 @@ def backfill_flow(
             hist = ad.eastmoney.flow_daily_stock(code, day)
         except CaptchaError as exc:
             _quality(conn, "flow_daily_stock", day, "", exc)
+            if on_stall:
+                on_stall(f"触发验证：{exc}")
             break
         except AdapterError as exc:
             _quality(conn, "flow_daily_stock", day, "", exc)
             mark_progress(conn, TASK_FLOW, code, "failed")
+            failures += 1
+            if failures >= max_consecutive_failures:
+                if on_stall:
+                    on_stall(f"连续 {failures} 只失败：{str(exc)[:200]}")
+                break
             continue
+        failures = 0
         hist = hist.filter(pl.col("trade_date") >= since)
         if hist.is_empty():
             mark_progress(conn, TASK_FLOW, code, "done", None)

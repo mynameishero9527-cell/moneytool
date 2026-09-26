@@ -89,6 +89,8 @@ def test_startup_syncs_reference_when_empty(ctx: AppContext) -> None:
     with ctx.db.read() as conn:
         assert reference_stale(conn, dt.date(2026, 9, 26))
     runner.job_startup_check()
+    assert calls == ["reference"]
+    runner._concepts_if_empty()
     assert calls == ["reference", "concepts"]
     with ctx.db.read() as conn:
         assert conn.execute("SELECT count(*) FROM job_run WHERE job = 'catchup'").fetchone() == (0,)

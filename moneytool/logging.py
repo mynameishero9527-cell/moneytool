@@ -19,6 +19,8 @@ def setup_logging(logs_dir: Path | None, level: str = "INFO", retention_days: in
         handlers.append(logging.FileHandler(logs_dir / f"moneytool-{today}.log", encoding="utf-8"))
         _prune_logs(logs_dir, retention_days)
     logging.basicConfig(level=level, format="%(message)s", handlers=handlers, force=True)
+    # APScheduler 每次启动逐个打印「Adding job」，淹没有用信息；只保留警告以上
+    logging.getLogger("apscheduler").setLevel(logging.WARNING)
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
