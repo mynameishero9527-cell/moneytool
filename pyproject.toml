@@ -27,6 +27,7 @@ dependencies = [
   "typer>=0.12",
   "pandas>=2.0",
   "pyarrow>=16",
+  "tzdata>=2024.1; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
