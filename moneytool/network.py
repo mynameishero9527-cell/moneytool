@@ -1,10 +1,19 @@
-"""数据源代理设置。AkShare（requests）与 httpx 都读 HTTP(S)_PROXY / NO_PROXY 环境变量，
-Windows 下还会读系统代理（注册表）；这里在进程启动时按 `[network] proxy` 统一设置。"""
+"""数据源网络设置。
+
+- 代理：AkShare（requests）与 httpx 都读 HTTP(S)_PROXY / NO_PROXY 环境变量，Windows 下还会读系统代理
+  （注册表）；这里在进程启动时按 `[network] proxy` 统一设置。
+- 请求头：东方财富接口不带 Referer 时直接断开连接（RemoteDisconnected），而 AkShare 只发 User-Agent，
+  这里给所有发往 eastmoney.com 的 requests 请求补上浏览器请求头。
+"""
 
 from __future__ import annotations
 
 import os
 import urllib.request
+from typing import Any
+from urllib.parse import urlsplit
+
+import requests
 
 from moneytool.config import Settings
 
@@ -19,9 +28,45 @@ SOURCE_DOMAINS = (
     "joinquant.com",
 )
 
+BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+def eastmoney_headers(host: str) -> dict[str, str]:
+    referer = (
+        "https://quote.eastmoney.com/"
+        if host.startswith("push2.") or ".push2." in host
+        else "https://data.eastmoney.com/"
+    )
+    return {"User-Agent": BROWSER_UA, "Referer": referer, "Accept-Language": "zh-CN,zh;q=0.9"}
+
+
+def install_request_headers() -> None:
+    """包装 `requests.Session.request`：发往 eastmoney.com 的请求缺哪个头补哪个，已有的不动。可重复调用。"""
+    if getattr(requests.Session.request, "_moneytool_headers", False):
+        return
+    original = requests.Session.request
+
+    def request(self: requests.Session, method: str, url: str, *args: Any, **kwargs: Any) -> Any:
+        host = urlsplit(str(url)).hostname or ""
+        if host == "eastmoney.com" or host.endswith(".eastmoney.com"):
+            headers = dict(kwargs.get("headers") or {})
+            present = {k.lower() for k in headers}
+            for k, v in eastmoney_headers(host).items():
+                if k.lower() not in present:
+                    headers[k] = v
+            kwargs["headers"] = headers
+        return original(self, method, url, *args, **kwargs)
+
+    request._moneytool_headers = True  # type: ignore[attr-defined]
+    requests.Session.request = request  # type: ignore[method-assign,assignment]
+
 
 def apply_network(settings: Settings) -> str:
     """返回当前生效方式的说明，供 doctor 展示。"""
+    install_request_headers()
     mode = settings.network.proxy.strip()
     if mode == "system":
         return "沿用系统代理"
