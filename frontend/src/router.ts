@@ -6,6 +6,7 @@ export const router = createRouter({
   routes: [
     { path: "/", name: "market", component: () => import("./views/MarketView.vue") },
     { path: "/board", name: "board", component: () => import("./views/BoardView.vue") },
+    { path: "/flow", name: "flow", component: () => import("./views/FlowCycleView.vue") },
     { path: "/sectors/:id", name: "sector", component: () => import("./views/SectorDetailView.vue"), props: true },
     { path: "/stocks/:code", name: "stock", component: () => import("./views/StockView.vue"), props: true },
     { path: "/actions", name: "actions", component: () => import("./views/ActionsView.vue") },

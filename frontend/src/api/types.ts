@@ -435,3 +435,95 @@ export interface SearchResult {
   stocks: { code: string; name: string; kind: "stock" }[];
   sectors: { code: string; name: string; kind: SectorLevel }[];
 }
+
+export type HorizonKey = "1d" | "5d" | "20d" | "40d" | "60d" | "120d" | "250d";
+export type TrendDirection = "up" | "flat" | "down";
+
+export interface HorizonDef {
+  key: HorizonKey;
+  days: number;
+  label: string;
+  hint: string;
+}
+
+export interface HorizonCell {
+  net_main: number | null;
+  amount: number | null;
+  main_ratio: number | null;
+  ret: number | null;
+  inflow_days_ratio: number | null;
+  flow_rank_pct: number | null;
+  ret_rank_pct: number | null;
+}
+
+export interface TrendFields {
+  score: number | null;
+  direction: TrendDirection | null;
+  strength: "strong" | "medium" | "weak" | null;
+  short_score: number | null;
+  mid_score: number | null;
+  long_score: number | null;
+  consistency: "aligned" | "mixed" | "insufficient" | null;
+  accel: number | null;
+}
+
+export interface FlowHorizonItem extends TrendFields {
+  sector_id: string;
+  name: string;
+  level: SectorLevel;
+  small_sample: boolean | null;
+  member_count: number | null;
+  h: Partial<Record<HorizonKey, HorizonCell>>;
+}
+
+export interface FlowHorizonsData {
+  horizons: HorizonDef[];
+  market: Partial<Record<HorizonKey, HorizonCell>>;
+  items: FlowHorizonItem[];
+  note: string;
+}
+
+export type SignalKind = "surge_in" | "surge_out" | "turn_up" | "turn_down" | "resonance_in" | "resonance_out";
+
+export interface FlowSignal {
+  trade_date: string;
+  segment: string;
+  sector_id: string;
+  name: string | null;
+  level: SectorLevel | null;
+  kind: SignalKind;
+  kind_zh: string;
+  score: number;
+  text: string;
+  created_at?: string;
+}
+
+export interface FlowSignalsData {
+  items: FlowSignal[];
+  kinds: Record<SignalKind, string>;
+}
+
+export interface BacktestStat {
+  samples: number;
+  up_ratio: number | null;
+  avg_ret: number | null;
+  avg_excess: number | null;
+  beat_ratio: number | null;
+}
+
+export interface FlowSectorData {
+  horizons: HorizonDef[];
+  h: Partial<Record<HorizonKey, HorizonCell>>;
+  market: Partial<Record<HorizonKey, HorizonCell>>;
+  trend: (TrendFields & { reasons: string[]; backtest: Partial<Record<"5d" | "20d", BacktestStat>> }) | null;
+  history: { trade_date: string; score: number | null; short_score: number | null; mid_score: number | null; long_score: number | null; direction: TrendDirection | null }[];
+  signals: FlowSignal[];
+  note: string;
+}
+
+export interface BacktestRow extends BacktestStat {
+  trade_date: string;
+  level: string;
+  direction: TrendDirection;
+  fwd_days: number;
+}

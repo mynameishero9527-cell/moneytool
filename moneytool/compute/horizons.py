@@ -76,6 +76,7 @@ class HorizonResult:
     trends: pl.DataFrame  # 当日每板块一行
     backtest: pl.DataFrame  # 截至当日的历史统计：级别 × 方向 × 前瞻天数
     signals: pl.DataFrame  # 当日资金动向信号
+    history: pl.DataFrame  # 窗口内当日之前各日的倾向得分（无依据文本），供补齐得分走势
 
 
 def _base(sector_feat: pl.DataFrame, market: pl.DataFrame) -> pl.DataFrame:
@@ -306,12 +307,13 @@ def backtest_frame(trend: pl.DataFrame) -> pl.DataFrame:
     return pl.concat(parts).sort("level", "direction", "fwd_days")
 
 
-def fmt_money(v: float | None) -> str:
+def fmt_money(v: float | None, *, signed: bool = True) -> str:
     if v is None:
         return "—"
+    sign = "+" if signed else ""
     if abs(v) >= 1e8:
-        return f"{v / 1e8:+.2f} 亿"
-    return f"{v / 1e4:+.0f} 万"
+        return f"{v / 1e8:{sign}.2f} 亿"
+    return f"{v / 1e4:{sign}.0f} 万"
 
 
 def _pct(v: float | None, digits: int = 1) -> str:
@@ -407,7 +409,7 @@ def _signal_rows(
                         r,
                         "surge_in",
                         multiple,
-                        f"{name} 当天主力净流入 {fmt_money(net)}，为近 20 日日均规模的 {multiple:.1f} 倍，"
+                        f"{name} 当天主力净流入 {fmt_money(net, signed=False)}，为近 20 日日均规模的 {multiple:.1f} 倍，"
                         f"主力占比居同级 {fr:.0f} 分位",
                         net=net,
                         multiple=multiple,
@@ -417,7 +419,7 @@ def _signal_rows(
                         r,
                         "surge_out",
                         -multiple,
-                        f"{name} 当天主力净流出 {fmt_money(-net)}，为近 20 日日均规模的 {multiple:.1f} 倍，"
+                        f"{name} 当天主力净流出 {fmt_money(-net, signed=False)}，为近 20 日日均规模的 {multiple:.1f} 倍，"
                         f"主力占比居同级 {fr:.0f} 分位",
                         net=net,
                         multiple=multiple,
@@ -458,6 +460,20 @@ def _signal_rows(
     return rows
 
 
+TREND_COLUMNS = (
+    "sector_id",
+    "trade_date",
+    "score",
+    "direction",
+    "strength",
+    pl.col("short_score") * 100,
+    pl.col("mid_score") * 100,
+    pl.col("long_score") * 100,
+    "consistency",
+    "accel",
+)
+
+
 def compute_horizons(
     sector_feat: pl.DataFrame,
     market: pl.DataFrame,
@@ -478,18 +494,7 @@ def compute_horizons(
     prev = trend.filter(pl.col("trade_date") == prev_day) if prev_day is not None else None
 
     sectors_today = today.filter(pl.col("level") != MARKET_ID)
-    trend_rows = sectors_today.select(
-        "sector_id",
-        "trade_date",
-        "score",
-        "direction",
-        "strength",
-        pl.col("short_score") * 100,
-        pl.col("mid_score") * 100,
-        pl.col("long_score") * 100,
-        "consistency",
-        "accel",
-    ).with_columns(
+    trend_rows = sectors_today.select(TREND_COLUMNS).with_columns(
         reasons=pl.Series(
             [to_json(trend_reasons(r)) for r in sectors_today.iter_rows(named=True)], dtype=pl.Utf8
         ),
@@ -520,4 +525,9 @@ def compute_horizons(
         trends=trend_rows,
         backtest=bt.with_columns(trade_date=pl.lit(day, dtype=pl.Date)),
         signals=signals,
+        history=trend.filter(
+            (pl.col("trade_date") < day)
+            & (pl.col("level") != MARKET_ID)
+            & pl.col("score").is_not_null()
+        ).select(TREND_COLUMNS),
     )

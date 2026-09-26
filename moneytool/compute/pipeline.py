@@ -485,6 +485,16 @@ def _persist_horizons(
     upsert(conn, "flow_signal", hz.signals.with_columns(tag))
     if segment is None:
         upsert(conn, "trend_backtest", hz.backtest.with_columns(param_version=pl.lit(p.version)))
+        # 首次计算或新增板块时，补齐窗口内缺失的历史得分（按当前成分回算，已有的不覆盖）
+        done = conn.execute(
+            "SELECT DISTINCT sector_id, trade_date FROM sector_trend "
+            "WHERE segment = 'close' AND param_version = ? AND trade_date >= ?",
+            [p.version, hz.history["trade_date"].min() or day],
+        ).pl()
+        missing = hz.history.join(
+            done.cast({"trade_date": pl.Date}), on=["sector_id", "trade_date"], how="anti"
+        )
+        upsert(conn, "sector_trend", missing.with_columns(tag))
     result.chain_counts["horizon_signals"] = hz.signals.height
 
 

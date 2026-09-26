@@ -140,3 +140,35 @@ export function stockHistoryOption(rows: StockHistoryRow[]): ChartOption {
     ],
   };
 }
+
+/** 趋势倾向得分走势：综合得分柱（红正绿负）+ 短 / 中 / 长期分量线 */
+export function trendHistoryOption(
+  rows: { trade_date: string; score: number | null; short_score: number | null; mid_score: number | null; long_score: number | null }[],
+): ChartOption {
+  const x = rows.map((r) => r.trade_date);
+  const line = (name: string, key: "short_score" | "mid_score" | "long_score", color: string) => ({
+    name,
+    type: "line",
+    showSymbol: false,
+    lineStyle: { width: 1.2, color },
+    itemStyle: { color },
+    data: rows.map((r) => (r[key] === null ? null : Math.round(r[key]! * 10) / 10)),
+  });
+  return {
+    tooltip: { trigger: "axis" },
+    legend: { top: 0, textStyle: { fontSize: 11 } },
+    grid: { ...GRID, left: 40, right: 16 },
+    xAxis: { type: "category", data: x, ...AXIS },
+    yAxis: { type: "value", min: -100, max: 100, ...AXIS, splitLine: { lineStyle: { color: "#F3F4F6" } } },
+    series: [
+      {
+        name: "综合得分",
+        type: "bar",
+        data: rows.map((r) => ({ value: r.score, itemStyle: { color: barColor(r.score), opacity: 0.7 } })),
+      },
+      line("短期", "short_score", "#2563EB"),
+      line("中期", "mid_score", "#A855F7"),
+      line("长期", "long_score", "#64748B"),
+    ],
+  };
+}

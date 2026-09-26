@@ -1,5 +1,9 @@
 import type {
   ActionRow,
+  BacktestRow,
+  FlowHorizonsData,
+  FlowSectorData,
+  FlowSignalsData,
   BriefRow,
   Envelope,
   ListType,
@@ -111,4 +115,10 @@ export const api = {
   brief: (kind: "close" | "premarket", trade_date?: string | null) =>
     get<BriefRow>("/brief", { kind, trade_date }),
   briefs: (limit = 30) => get<BriefRow[]>("/briefs", { limit }),
+  flowHorizons: (scope: DateScope, level: string) => get<FlowHorizonsData>("/flow/horizons", { ...scope, level }),
+  flowSignals: (params: { days?: number; kind?: string | null; sector_id?: string | null; limit?: number } = {}) =>
+    get<FlowSignalsData>("/flow/signals", params),
+  flowSector: (id: string, scope: DateScope) =>
+    get<FlowSectorData>(`/flow/sectors/${encodeURIComponent(id)}`, scope),
+  flowBacktest: (trade_date?: string | null) => get<{ items: BacktestRow[]; note: string }>("/flow/backtest", { trade_date }),
 };

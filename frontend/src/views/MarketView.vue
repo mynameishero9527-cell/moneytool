@@ -7,6 +7,7 @@ import { marketHistoryOption } from "../charts/options";
 import { REGIME_LABEL, STAGE_COLOR, STAGE_LABEL, STAGE_ORDER, pct, yi } from "../charts/format";
 import EmptyState from "../components/EmptyState.vue";
 import EvidenceCard from "../components/EvidenceCard.vue";
+import FlowSignalFeed from "../components/FlowSignalFeed.vue";
 import MetaBadge from "../components/MetaBadge.vue";
 import { useEcharts } from "../composables/useEcharts";
 import { useTradeDateStore } from "../stores/tradeDate";
@@ -96,6 +97,11 @@ const pressureLabel = (v: number | null) => (v === null ? "历史不足" : v >= 
           <EvidenceCard v-if="showGate" :evidence="(data.evidence as never)" :footer="`参数 ${data.param_version}`" />
         </div>
       </div>
+
+      <div class="section-title">
+        资金动向 <router-link class="muted more" :to="{ name: 'flow', query: $route.query }">资金周期 →</router-link>
+      </div>
+      <div class="card"><FlowSignalFeed :limit="10" :days="3" /></div>
 
       <div class="section-title">近 120 日：全市场主力净流入、等权累计收益、情绪压力（黄色区间为风控开启）</div>
       <div ref="chartEl" class="chart card" />

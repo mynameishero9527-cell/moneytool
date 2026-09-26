@@ -115,7 +115,7 @@ def test_surge_signal_and_turn(params: Params) -> None:
     kinds = {(r["sector_id"], r["kind"]) for r in res.signals.iter_rows(named=True)}
     assert ("A", "surge_in") in kinds
     text = res.signals.filter(pl.col("kind") == "surge_in")["text"][0]
-    assert text.startswith("甲行业 当天主力净流入 +5.00 亿")
+    assert text.startswith("甲行业 当天主力净流入 5.00 亿")
     # 稳定上升的板块不是「转向」
     assert ("A", "turn_up") not in kinds
     assert res.trends.height == 3 and set(res.horizons["sector_id"]) == {"A", "B", "C", "market"}
@@ -127,6 +127,8 @@ def test_texts_have_no_forbidden_words(params: Params) -> None:
     res = compute_horizons(feat, market, params, day, intraday=False)
     texts = list(res.signals["text"]) + [t for r in res.trends["reasons"] for t in json.loads(r)]
     assert texts
+    surge = res.signals.filter(pl.col("kind") == "surge_out")["text"][0]
+    assert "净流出 5.00 亿" in surge
     for t in texts:
         assert not any(w in t for w in FORBIDDEN_WORDS), t
 
@@ -145,6 +147,15 @@ def test_pipeline_persists_and_api(db: Database, params: Params) -> None:
             "SELECT count(*) FROM sector_trend WHERE trade_date = ?", [dates[-1]]
         ).fetchone()
         assert trend is not None and trend[0] == 3
+        kept = conn.execute(
+            "SELECT count(*) FROM sector_trend WHERE trade_date = ? AND reasons IS NOT NULL",
+            [dates[-2]],
+        ).fetchone()
+        assert kept is not None and kept[0] == 3
+        backfilled = conn.execute(
+            "SELECT count(*), count(reasons) FROM sector_trend WHERE trade_date < ?", [dates[-2]]
+        ).fetchone()
+        assert backfilled is not None and backfilled[0] > 0 and backfilled[1] == 0
         conn.execute(
             "INSERT INTO flow_signal (trade_date, segment, sector_id, kind, param_version, score, text, payload) "
             "VALUES (?, 'close', 'sw:801010', 'surge_in', ?, 4.0, '测试板块 当天主力净流入', '{\"level\": \"L1\"}')",
@@ -170,7 +181,9 @@ def test_pipeline_persists_and_api(db: Database, params: Params) -> None:
         detail = c.get("/api/flow/sectors/sw:801000").json()["data"]
         assert detail["trend"]["direction"] in ("up", "flat", "down")
         assert isinstance(detail["trend"]["reasons"], list)
-        assert len(detail["history"]) == 2
+        # 首次收盘计算即补齐窗口内的历史得分
+        assert len(detail["history"]) > 30
+        assert detail["history"][-1]["trade_date"] == dates[-1].isoformat()
 
         sig = c.get("/api/flow/signals").json()["data"]["items"]
         assert sig[0]["kind_zh"] == "资金异动流入"

@@ -107,3 +107,27 @@ export function signClass(v: number | null | undefined): string {
   if (v === null || v === undefined || v === 0) return "neutral";
   return v > 0 ? "up" : "down";
 }
+
+export const DIRECTION_LABEL: Record<string, string> = { up: "上升倾向", flat: "震荡", down: "下降倾向" };
+export const STRENGTH_LABEL: Record<string, string> = { strong: "强", medium: "中", weak: "弱" };
+export const CONSISTENCY_LABEL: Record<string, string> = {
+  aligned: "短中长期一致",
+  mixed: "短中长期分化",
+  insufficient: "历史不足",
+};
+
+/** 分位 0–100 → 底色：高分位偏红、低分位偏绿（A 股红涨绿跌），50 附近无色。 */
+export function rankHeat(rank: number | null | undefined): string {
+  if (rank === null || rank === undefined) return "transparent";
+  const d = (rank - 50) / 50;
+  const a = Math.min(Math.abs(d), 1) * 0.55;
+  if (a < 0.04) return "transparent";
+  return d > 0 ? `rgba(217, 54, 62, ${a.toFixed(3)})` : `rgba(31, 157, 85, ${a.toFixed(3)})`;
+}
+
+/** 金额 → 自适应亿 / 万，带符号 */
+export function money(v: number | null | undefined): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  const s = v > 0 ? "+" : "";
+  return Math.abs(v) >= 1e8 ? `${s}${(v / 1e8).toFixed(2)}亿` : `${s}${(v / 1e4).toFixed(0)}万`;
+}

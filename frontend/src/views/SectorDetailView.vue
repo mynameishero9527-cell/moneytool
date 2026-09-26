@@ -11,6 +11,7 @@ import EvidenceCard from "../components/EvidenceCard.vue";
 import HintBlock from "../components/HintBlock.vue";
 import IndexGauge from "../components/IndexGauge.vue";
 import MetaBadge from "../components/MetaBadge.vue";
+import SectorHorizonPanel from "../components/SectorHorizonPanel.vue";
 import StageBadge from "../components/StageBadge.vue";
 import { useEcharts } from "../composables/useEcharts";
 import { useTradeDateStore } from "../stores/tradeDate";
@@ -132,6 +133,9 @@ const showAttr = ref(false);
         <a v-if="attribution.hype" href="#" class="muted" @click.prevent="showAttr = !showAttr">{{ showAttr ? "收起" : "依据" }}</a>
       </div>
       <EvidenceCard v-if="showAttr && attribution?.hype" :evidence="{ hype: attribution.hype.items }" />
+
+      <div class="section-title">多周期资金与趋势倾向（当天 / 5 日 / 20 日 / 40 日 / 60 日 / 120 日 / 250 日）</div>
+      <SectorHorizonPanel :id="id" />
 
       <div class="section-title">近 120 日：主力净流入、5 日均值、市场份额；底色为阶段</div>
       <div ref="chartEl" class="chart card" />
