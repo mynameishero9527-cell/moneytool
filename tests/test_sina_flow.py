@@ -98,7 +98,7 @@ def test_rows_for_and_codes() -> None:
 
 
 def test_pace_defaults_by_source() -> None:
-    assert BackfillConfig().flow_pace("sina") == (2, 1.0)
+    assert BackfillConfig().flow_pace("sina") == (4, 0.5)
     assert BackfillConfig().flow_pace("eastmoney") == (1, 3.0)
     assert BackfillConfig(flow_workers=3, flow_interval_seconds=2.5).flow_pace("sina") == (3, 2.5)
 
@@ -171,9 +171,9 @@ def test_batch_uses_configured_source(tmp_data_dir: Path, monkeypatch: pytest.Mo
     runner = JobRunner(ctx)
     runner.job_backfill_batch(4)
     assert seen["source"] == "sina"
-    assert seen["workers"] == 2
+    assert seen["workers"] == 4
     assert seen["n"] == 4
-    assert runner.flow_limiter.floor == 1.0
+    assert runner.flow_limiter.floor == 0.5
     ctx.close()
 
 

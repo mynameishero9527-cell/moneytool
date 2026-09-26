@@ -86,13 +86,15 @@ class ScheduleConfig(BaseModel):
     catchup_min_coverage: float = 0.8  # 当日日线覆盖在市证券比例不足则不补算，避免用残缺数据出结论
 
 
-FLOW_BACKFILL_DEFAULTS: dict[str, tuple[int, float]] = {"sina": (2, 1.0), "eastmoney": (1, 3.0)}
+FLOW_BACKFILL_DEFAULTS: dict[str, tuple[int, float]] = {"sina": (4, 0.5), "eastmoney": (1, 3.0)}
 
 
 class BackfillConfig(BaseModel):
     batch: int = 100  # 每批标的数，每批写库一次
+    # 日线（Baostock）回补进程数：Baostock 一个进程只有一个连接，多进程各自登录并发拉取；1 为不开子进程
+    bars_workers: int = 3
     # 个股资金流：多线程共享一个自适应限速器，成功时间隔逐步降到下限，失败翻倍直到上限。
-    # 不填时按来源取默认值：新浪 2 线程 / 1 秒，东财 1 线程 / 3 秒（东财易封 IP）
+    # 不填时按来源取默认值：新浪 4 线程 / 0.5 秒，东财 1 线程 / 3 秒（东财易封 IP）
     flow_workers: int | None = None
     flow_interval_seconds: float | None = None
     flow_max_interval_seconds: float = 30.0
@@ -205,10 +207,12 @@ backfill_years_flow = 2
 backfill_years_bars = 5
 
 [backfill]
-# 个股资金流回补的线程数与最小请求间隔（秒），不填按来源默认：新浪 2 线程 / 1 秒，东财 1 线程 / 3 秒。
+# 日线回补进程数（Baostock 每个进程一个连接，多进程并发）；电脑较慢可改为 1
+bars_workers = 3
+# 个股资金流回补的线程数与最小请求间隔（秒），不填按来源默认：新浪 4 线程 / 0.5 秒，东财 1 线程 / 3 秒。
 # 失败时间隔自动翻倍，连续失败暂停 30 分钟起、逐次翻倍到 4 小时；东财间隔过小会被封 IP
-# flow_workers = 2
-# flow_interval_seconds = 1.0
+# flow_workers = 4
+# flow_interval_seconds = 0.5
 flow_max_interval_seconds = 30.0
 
 [rate_limit.eastmoney]

@@ -12,6 +12,12 @@ from moneytool.storage.conn import Database
 from moneytool.storage.migrate import migrate
 
 
+@pytest.fixture(autouse=True)
+def _no_bars_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
+    """测试里不起 Baostock 子进程池（只测单进程路径；进程池单独测）。"""
+    monkeypatch.setattr("moneytool.scheduler.jobs.BarsPool", lambda *a, **k: None)
+
+
 @pytest.fixture(scope="session")
 def params() -> Params:
     return latest_params(builtin_params_dir())

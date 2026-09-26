@@ -29,6 +29,10 @@ class AdapterError(RuntimeError):
         self.endpoint = endpoint
         self.reason = reason
 
+    def __reduce__(self) -> tuple[Any, tuple[str, str, str]]:
+        # 多进程回补时跨进程传回；默认的 pickle 只带消息文本，还原会缺参数
+        return (self.__class__, (self.source, self.endpoint, self.reason))
+
 
 class CaptchaError(AdapterError):
     """东财滑块验证 / 反爬：响应非 JSON 或为空。当日停止该源个股级请求。"""

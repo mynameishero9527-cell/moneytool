@@ -26,6 +26,7 @@ from moneytool.ingest.bars import (
     store_bars,
     update_float_mv,
 )
+from moneytool.ingest.bars_pool import BarsPool
 from moneytool.ingest.flow import (
     CLOSE_SEGMENT,
     TASK_FLOW,
@@ -88,6 +89,9 @@ class JobRunner:
         self.flow_source = ctx.settings.data.flow_source
         self.flow_workers, interval = cfg.flow_pace(self.flow_source)
         self.flow_limiter = AdaptiveLimiter(interval, cfg.flow_max_interval_seconds)
+        self.bars_pool = (
+            BarsPool(ctx.settings.data_dir, cfg.bars_workers) if cfg.bars_workers > 1 else None
+        )
 
     def run_job(
         self, name: str, fn: Callable[[duckdb.DuckDBPyConnection], Any], *, segment: str = ""
@@ -528,16 +532,27 @@ class JobRunner:
         lane = self.progress.lanes["bars"]
         lane.begin(len(todo))
         years = self.ctx.settings.data.backfill_years_bars
+        start = day - dt.timedelta(days=365 * years)
         try:
-            results = fetch_bars(
-                self.ctx.adapters,
-                todo,
-                start=day - dt.timedelta(days=365 * years),
-                end=day,
-                day=day,
-                should_stop=self.stop_event.is_set,
-                on_item=lane.tick,
-            )
+            if self.bars_pool is not None:
+                results = self.bars_pool.fetch(
+                    todo,
+                    start=start,
+                    end=day,
+                    day=day,
+                    should_stop=self.stop_event.is_set,
+                    on_item=lane.tick,
+                )
+            else:
+                results = fetch_bars(
+                    self.ctx.adapters,
+                    todo,
+                    start=start,
+                    end=day,
+                    day=day,
+                    should_stop=self.stop_event.is_set,
+                    on_item=lane.tick,
+                )
         except Exception as exc:
             log.error("backfill_fetch_failed", task=BARS_TASK, error=str(exc))
             lane.end()
@@ -645,6 +660,11 @@ class JobRunner:
             self.stop_event.wait(LANE_POLL_SECONDS)
         for t in threads:
             t.join(timeout=5)
+        self.close()
+
+    def close(self) -> None:
+        if self.bars_pool is not None:
+            self.bars_pool.close()
 
     def _lane_loop(self, lane: BackfillLane) -> None:
         size = self.ctx.settings.backfill.batch

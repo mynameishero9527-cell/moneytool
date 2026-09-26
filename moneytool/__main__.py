@@ -182,6 +182,7 @@ def _run(
         uvicorn.run(fastapi_app, host=listen, port=listen_port, log_level="warning")
     finally:
         runner.stop_event.set()
+        runner.close()
         if scheduler is not None:
             scheduler.shutdown(wait=False)
         ctx.close()

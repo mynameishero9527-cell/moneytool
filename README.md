@@ -84,8 +84,9 @@ backfill_years_flow = 2        # 资金流回补年数；新浪最多约 8 年�
 
 [backfill]
 batch = 100                    # 每批标的数，每批写库一次
-# flow_workers = 2             # 资金流并发线程数；不填按来源默认：新浪 2，东财 1
-# flow_interval_seconds = 1.0  # 最小请求间隔；不填按来源默认：新浪 1 秒，东财 3 秒（东财过快会封 IP）
+bars_workers = 3               # 日线回补进程数；Baostock 每个进程只能有一个会话，多进程各自登录并行拉取；填 1 则在主进程内串行
+# flow_workers = 4             # 资金流并发线程数；不填按来源默认：新浪 4，东财 1
+# flow_interval_seconds = 0.5  # 最小请求间隔；不填按来源默认：新浪 0.5 秒，东财 3 秒（东财过快会封 IP）
 flow_max_interval_seconds = 30.0
 ```
 
