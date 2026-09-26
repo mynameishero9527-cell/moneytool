@@ -16,6 +16,19 @@ python -m moneytool init          # 建 ~/.moneytool：配置、参数版本、�
 python -m moneytool run           # 调度 + 回补 + Web，默认 http://127.0.0.1:8000
 ```
 
+Windows（PowerShell）：
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1       # 提示禁止运行脚本时先执行：Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+pip install -e ".[dev]"
+
+python -m moneytool init           # 数据目录为 C:\Users\<用户名>\.moneytool
+python -m moneytool run
+```
+
+Windows 没有 `make`，`make check` 对应的命令为 `ruff check . ; ruff format --check . ; mypy moneytool ; pytest -q -m "not network"`，重新构建前端用 `python scripts/build_frontend.py`。
+
 数据目录可用 `--data-dir` 或环境变量 `MONEYTOOL_DATA__DIR` 覆盖。首次运行会在后台回补 5 年日线与 2 年日频资金流，进度见「数据状态」页。
 
 常用命令：
