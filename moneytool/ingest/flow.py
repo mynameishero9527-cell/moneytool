@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -21,7 +22,7 @@ from moneytool.adapters.registry import Adapters
 from moneytool.compute.flow import FLOW_COLS, reconcile, segment_diff
 from moneytool.ingest.bars import mark_progress, pending_codes
 from moneytool.logging import get_logger
-from moneytool.storage.repo import record_quality, upsert
+from moneytool.storage.repo import record_quality, setting_get, setting_set, upsert
 from moneytool.types import QualityStatus, Segment
 
 log = get_logger(__name__)
@@ -36,7 +37,7 @@ def _quality(
     status = QualityStatus.CAPTCHA if isinstance(exc, CaptchaError) else QualityStatus.MISSING
     record_quality(
         conn,
-        source="eastmoney",
+        source=exc.source,
         endpoint=endpoint,
         trade_date=day,
         segment=segment,
@@ -259,6 +260,7 @@ def backfill_flow(
     max_consecutive_failures: int = 3,
     workers: int = 1,
     limiter: AdaptiveLimiter | None = None,
+    source: str = "eastmoney",
 ) -> int:
     """拉个股日频资金流写 flow_daily（reconciled=True，因为就是日频源）。返回完成的股票数。"""
     todo = codes if codes is not None else pending_codes(conn, TASK_FLOW)
@@ -268,6 +270,7 @@ def backfill_flow(
         ad,
         todo,
         day,
+        source=source,
         workers=workers,
         limiter=limiter,
         should_stop=should_stop,
@@ -285,6 +288,8 @@ def fetch_flow(
     codes: list[str],
     day: dt.date,
     *,
+    source: str = "eastmoney",
+    since: dict[str, dt.date] | None = None,
     workers: int = 1,
     limiter: AdaptiveLimiter | None = None,
     should_stop: Callable[[], bool] | None = None,
@@ -292,9 +297,12 @@ def fetch_flow(
     max_consecutive_failures: int = 3,
 ) -> list[FlowResult]:
     """只拉数据不写库（可在写锁外执行）。`workers` 个线程并发，请求节奏由共享的 `limiter` 控制。
+    `source` 为适配器名（sina / eastmoney）；`since` 给出各股已有数据的最后一天，只取之后的行。
 
     遇验证、或连续 `max_consecutive_failures` 只失败（多为代理 / 网络问题）即停止本轮，
     通过 `on_stall(原因)` 通知调用方暂停，避免每只都走完重试退避、拖住整个回补。"""
+    adapter = getattr(ad, source)
+    last = since or {}
     halt = threading.Event()
     state_lock = threading.Lock()
     failures = 0
@@ -305,7 +313,9 @@ def fetch_flow(
         if halt.is_set() or (should_stop and should_stop()):
             return None
         try:
-            hist = ad.eastmoney.flow_daily_stock(code, day, limiter=limiter, retries=False)
+            hist = adapter.flow_daily_stock(
+                code, day, limiter=limiter, retries=False, since=last.get(code)
+            )
         except AdapterError as exc:
             if limiter:
                 limiter.failed()
@@ -335,6 +345,7 @@ def store_flow(
     conn: duckdb.DuckDBPyConnection, results: list[FlowResult], day: dt.date, since: dt.date
 ) -> int:
     done = 0
+    restated: set[dt.date] = set()
     for code, res in results:
         if isinstance(res, AdapterError):
             _quality(conn, "flow_daily_stock", day, "", res)
@@ -361,10 +372,78 @@ def store_flow(
             "reconciled",
             "reconcile_diff",
         )
+        restated.update(
+            r[0]
+            for r in conn.execute(
+                "SELECT DISTINCT trade_date FROM flow_daily "
+                "WHERE code = ? AND NOT reconciled AND trade_date BETWEEN ? AND ?",
+                [code, df["trade_date"].min(), df["trade_date"].max()],
+            ).fetchall()
+        )
         upsert(conn, "flow_daily", df)
         mark_progress(conn, TASK_FLOW, code, "done", df["trade_date"].max())  # type: ignore[arg-type]
         done += 1
+    if restated:
+        note_restated(conn, restated)
     return done
+
+
+RESTATED_KEY = "flow_restated_dates"
+
+
+def reset_flow_history(conn: duckdb.DuckDBPyConnection) -> int:
+    """换日频来源时清空资金流历史与回补进度（两家口径不同，不能混在一段历史里）。"""
+    row = conn.execute("SELECT count(*) FROM flow_daily").fetchone()
+    days = {r[0] for r in conn.execute("SELECT DISTINCT trade_date FROM flow_daily").fetchall()}
+    conn.execute("DELETE FROM flow_daily")
+    conn.execute("DELETE FROM backfill_progress WHERE task = ?", [TASK_FLOW])
+    if days:
+        note_restated(conn, days)
+    return int(row[0]) if row else 0
+
+
+def note_restated(conn: duckdb.DuckDBPyConnection, dates: set[dt.date]) -> None:
+    """记下资金流被日频正式值改写过的日期（原为收盘快照近似值），补算时重算这些天的结果。"""
+    old = set(restated_dates(conn))
+    setting_set(conn, RESTATED_KEY, json.dumps(sorted(d.isoformat() for d in old | dates)))
+
+
+def restated_dates(conn: duckdb.DuckDBPyConnection) -> list[dt.date]:
+    raw = setting_get(conn, RESTATED_KEY)
+    return [dt.date.fromisoformat(x) for x in json.loads(raw)] if raw else []
+
+
+def clear_restated(conn: duckdb.DuckDBPyConnection, dates: list[dt.date]) -> None:
+    left = set(restated_dates(conn)) - set(dates)
+    setting_set(conn, RESTATED_KEY, json.dumps(sorted(d.isoformat() for d in left)))
+
+
+def pending_flow_codes(
+    conn: duckdb.DuckDBPyConnection, target: dt.date | None, refresh_before: dt.datetime
+) -> list[str]:
+    """待拉资金流的股票：从未拉过或失败的在前；已完成但最后一天早于 `target`、
+    且上次尝试早于 `refresh_before` 的（每日增量）排在后面。"""
+    rows = conn.execute(
+        "SELECT s.code FROM security s "
+        "LEFT JOIN backfill_progress p ON p.task = ? AND p.subject_id = s.code "
+        "WHERE NOT s.is_delisting AND (p.status IS NULL OR p.status <> 'done' "
+        "  OR (? IS NOT NULL AND (p.last_date IS NULL OR p.last_date < ?) AND p.updated_at < ?)) "
+        "ORDER BY CASE WHEN p.status IS NULL THEN 0 WHEN p.status <> 'done' THEN 1 ELSE 2 END, "
+        "COALESCE(p.attempts, 0), s.code",
+        [TASK_FLOW, target, target, refresh_before],
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def flow_last_dates(conn: duckdb.DuckDBPyConnection, codes: list[str]) -> dict[str, dt.date]:
+    if not codes:
+        return {}
+    rows = conn.execute(
+        "SELECT subject_id, last_date FROM backfill_progress "
+        "WHERE task = ? AND status = 'done' AND last_date IS NOT NULL AND list_contains(?, subject_id)",
+        [TASK_FLOW, codes],
+    ).fetchall()
+    return {str(c): d for c, d in rows}
 
 
 def segments_captured(conn: duckdb.DuckDBPyConnection, day: dt.date) -> list[str]:

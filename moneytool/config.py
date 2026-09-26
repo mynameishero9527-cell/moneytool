@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -37,6 +37,9 @@ class ServerConfig(BaseModel):
 
 class DataConfig(BaseModel):
     dir: Path = DEFAULT_DATA_DIR
+    # 日频资金流来源：sina（个股历史约 8 年）或 eastmoney（只有最近约 120 个交易日）。
+    # 两家大小单口径不同，整段历史只用一个来源；改了之后需重建资金流历史（见 README）
+    flow_source: Literal["sina", "eastmoney"] = "sina"
     backfill_years_flow: int = 2
     backfill_years_bars: int = 5
     raw_retention_days: int = 90
@@ -59,6 +62,9 @@ class RateLimitConfig(BaseModel):
     )
     shenwan: SourceRateLimit = SourceRateLimit(min_interval_seconds=1.0)
     csindex: SourceRateLimit = SourceRateLimit(min_interval_seconds=1.0)
+    sina: SourceRateLimit = SourceRateLimit(
+        min_interval_seconds=1.0, per_stock_interval_seconds=1.0, backoff_seconds=(5.0, 15.0)
+    )
 
 
 class CalendarConfig(BaseModel):
@@ -80,12 +86,20 @@ class ScheduleConfig(BaseModel):
     catchup_min_coverage: float = 0.8  # 当日日线覆盖在市证券比例不足则不补算，避免用残缺数据出结论
 
 
+FLOW_BACKFILL_DEFAULTS: dict[str, tuple[int, float]] = {"sina": (2, 1.0), "eastmoney": (1, 3.0)}
+
+
 class BackfillConfig(BaseModel):
     batch: int = 100  # 每批标的数，每批写库一次
-    # 东财个股资金流：多线程共享一个自适应限速器，成功时间隔逐步降到下限，失败翻倍直到上限
-    flow_workers: int = 1
-    flow_interval_seconds: float = 3.0
+    # 个股资金流：多线程共享一个自适应限速器，成功时间隔逐步降到下限，失败翻倍直到上限。
+    # 不填时按来源取默认值：新浪 2 线程 / 1 秒，东财 1 线程 / 3 秒（东财易封 IP）
+    flow_workers: int | None = None
+    flow_interval_seconds: float | None = None
     flow_max_interval_seconds: float = 30.0
+
+    def flow_pace(self, source: str) -> tuple[int, float]:
+        workers, interval = FLOW_BACKFILL_DEFAULTS.get(source, (1, 3.0))
+        return (self.flow_workers or workers, self.flow_interval_seconds or interval)
 
 
 class NetworkConfig(BaseModel):
@@ -185,14 +199,16 @@ open_browser = true
 proxy = "direct"
 
 [data]
+# 日频资金流来源：sina（默认，历史约 8 年）或 eastmoney（约 120 个交易日）；两家口径不同，不混用
+flow_source = "sina"
 backfill_years_flow = 2
 backfill_years_bars = 5
 
 [backfill]
-# 东财个股资金流回补：线程数与最小请求间隔（秒）。失败时间隔自动翻倍到上限，连续失败暂停 30 分钟起、逐次翻倍到 4 小时；
-# 间隔过小或线程过多，东财会断开连接并封 IP（实测十几分钟以上），不建议低于 2 秒
-flow_workers = 1
-flow_interval_seconds = 3.0
+# 个股资金流回补的线程数与最小请求间隔（秒），不填按来源默认：新浪 2 线程 / 1 秒，东财 1 线程 / 3 秒。
+# 失败时间隔自动翻倍，连续失败暂停 30 分钟起、逐次翻倍到 4 小时；东财间隔过小会被封 IP
+# flow_workers = 2
+# flow_interval_seconds = 1.0
 flow_max_interval_seconds = 30.0
 
 [rate_limit.eastmoney]

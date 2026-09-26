@@ -270,13 +270,24 @@ def backfill(
     data_dir: DataDirOpt = None,
     batch: Annotated[int | None, typer.Option(help="每批标的数（默认 [backfill] batch）")] = None,
     once: Annotated[bool, typer.Option("--once", help="只跑一批")] = False,
+    reset_flow: Annotated[
+        bool,
+        typer.Option(
+            "--reset-flow", help="清空资金流历史与进度后重新回补（改了 [data] flow_source 后用）"
+        ),
+    ] = False,
 ) -> None:
     """前台回补日线与日频资金流（主进程未运行时）。"""
     from moneytool.app import build_context  # noqa: PLC0415
+    from moneytool.ingest.flow import reset_flow_history  # noqa: PLC0415
     from moneytool.scheduler.jobs import JobRunner  # noqa: PLC0415
 
     ctx = build_context(data_dir)
     try:
+        if reset_flow:
+            with ctx.db.write() as conn:
+                n = reset_flow_history(conn)
+            typer.echo(f"已清空 {n} 行日频资金流，按 {ctx.settings.data.flow_source} 重新回补")
         runner = JobRunner(ctx)
         while True:
             b, f = runner.job_backfill_batch(batch)

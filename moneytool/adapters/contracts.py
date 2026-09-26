@@ -192,3 +192,21 @@ CSINDEX: dict[str, Contract] = {
         min_rows=1,
     ),
 }
+
+SINA: dict[str, Contract] = {
+    "flow_daily_stock": Contract(
+        columns={
+            "trade_date": pl.Date(),
+            "close": pl.Float64(),
+            "pct_chg": pl.Float64(),
+            **FLOW_COLS,
+        },
+        required_non_null=("trade_date",),
+        min_rows=0,
+        unit_notes=(
+            "新浪 MoneyFlow.ssl_qsfx_lscjfb：r0 特大单、r1 大单、r2 中单、r3 小单的成交额与净额（元）；"
+            "主力 = 特大单 + 大单；净占比 = 净额 / 四档成交额合计；涨跌幅源为小数。"
+            "各档净额按主动买卖统计，合计不为零，与东财口径不同，不能混用。"
+        ),
+    ),
+}

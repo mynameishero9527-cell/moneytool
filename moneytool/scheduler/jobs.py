@@ -29,10 +29,14 @@ from moneytool.ingest.flow import (
     CLOSE_SEGMENT,
     TASK_FLOW,
     capture_segment,
+    clear_restated,
     confirm_from_snapshot,
     fetch_flow,
+    flow_last_dates,
+    pending_flow_codes,
     rebuild_intraday,
     reconcile_sample,
+    restated_dates,
     store_flow,
 )
 from moneytool.ingest.reference import (
@@ -61,6 +65,8 @@ from moneytool.types import DataStatus, QualityStatus
 log = get_logger(__name__)
 FLOW_PAUSE_MINUTES = 30
 FLOW_PAUSE_MAX_MINUTES = 240
+FLOW_READY_HOUR = 18  # 新浪日频资金流当日数据可用的大致时刻（北京时间）
+FLOW_REFRESH_HOURS = 6  # 同一只股票两次增量尝试的最小间隔，源端未更新时不反复请求
 
 
 class JobRunner:
@@ -72,9 +78,9 @@ class JobRunner:
         self.flow_paused_until: dt.datetime | None = None
         self.flow_pause_streak = 0
         cfg = ctx.settings.backfill
-        self.flow_limiter = AdaptiveLimiter(
-            cfg.flow_interval_seconds, cfg.flow_max_interval_seconds
-        )
+        self.flow_source = ctx.settings.data.flow_source
+        self.flow_workers, interval = cfg.flow_pace(self.flow_source)
+        self.flow_limiter = AdaptiveLimiter(interval, cfg.flow_max_interval_seconds)
 
     def run_job(
         self, name: str, fn: Callable[[duckdb.DuckDBPyConnection], Any], *, segment: str = ""
@@ -199,6 +205,7 @@ class JobRunner:
             return []
         out: list[dt.date] = []
         need = s.catchup_min_coverage * total[0]
+        restated = set(restated_dates(conn))
         for (d,) in sorted(rows):
             cov = conn.execute(
                 "SELECT (SELECT count(*) FROM bar_daily WHERE trade_date = ?), "
@@ -213,8 +220,8 @@ class JobRunner:
                 [d, self.ctx.params_for(d).version],
             ).fetchone()
             if prev is not None:
-                # 先前资金流全缺按价格模式算过，资金流后来补齐则重算
-                if prev[0] == DataStatus.DEGRADED.value and cov[1] >= need:
+                # 先前资金流全缺按价格模式算过、或当时用的是收盘快照近似值，后来有了日频正式值则重算
+                if cov[1] >= need and (prev[0] == DataStatus.DEGRADED.value or d in restated):
                     out.append(d)
                 continue
             # 资金流部分到位时板块合计会失真，等回补完；全缺则走价格模式（结果标降级）
@@ -238,6 +245,13 @@ class JobRunner:
             res = self.run_job("catchup", compute(d))
             if res is not None:
                 done.append(d)
+        if done:
+
+            def forget(conn: duckdb.DuckDBPyConnection) -> int:
+                clear_restated(conn, done)
+                return len(done)
+
+            self.run_job("catchup_restated", forget)
         if done:
             last = done[-1]
             version = self.ctx.params_for(last).version
@@ -407,8 +421,9 @@ class JobRunner:
         def work(conn: duckdb.DuckDBPyConnection) -> int:
             n = 0
             if is_trading_day(conn, day):
-                codes = self._reconcile_sample_codes(conn, day)
-                n = reconcile_sample(conn, ad, day, codes)
+                if self.flow_source == "eastmoney":  # 新浪来源的日频正式值由回补线程每日增量拉取
+                    codes = self._reconcile_sample_codes(conn, day)
+                    n = reconcile_sample(conn, ad, day, codes)
                 self._sync_concepts(conn, day)
             confirmed = latest_confirmed_date(conn)
             if confirmed is not None:
@@ -513,18 +528,32 @@ class JobRunner:
         out = self.run_job("backfill", lambda conn: store_bars(conn, results, day))
         return out if isinstance(out, int) else 0
 
+    def _flow_target(self, conn: duckdb.DuckDBPyConnection) -> dt.date | None:
+        """新浪来源每日增量要补到的交易日：收盘数据约 18 点后才齐，之前以上一交易日为准。"""
+        if self.flow_source != "sina":
+            return None
+        now = now_sh()
+        if is_trading_day(conn, now.date()) and now.hour >= FLOW_READY_HOUR:
+            return now.date()
+        return previous_trading_day(conn, now.date())
+
     def _backfill_flow_batch(self, day: dt.date, n: int) -> int:
-        todo = self._pending(TASK_FLOW, n)
+        with self.ctx.db.read() as conn:
+            target = self._flow_target(conn)
+            refresh_before = now_sh() - dt.timedelta(hours=FLOW_REFRESH_HOURS)
+            todo = pending_flow_codes(conn, target, refresh_before)[:n]
+            last = flow_last_dates(conn, todo)
         if not todo:
             return 0
-        cfg = self.ctx.settings.backfill
         since = day - dt.timedelta(days=365 * self.ctx.settings.data.backfill_years_flow)
         try:
             results = fetch_flow(
                 self.ctx.adapters,
                 todo,
                 day,
-                workers=cfg.flow_workers,
+                source=self.flow_source,
+                since=last,
+                workers=self.flow_workers,
                 limiter=self.flow_limiter,
                 should_stop=self.stop_event.is_set,
                 on_stall=self._pause_flow,

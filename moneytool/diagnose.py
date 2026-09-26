@@ -154,6 +154,7 @@ def build_report(
     from moneytool.params import list_versions  # noqa: PLC0415
 
     out: list[str] = []
+    flow_source = settings.data.flow_source
     problems: list[str] = []
 
     def section(title: str) -> None:
@@ -184,6 +185,9 @@ def build_report(
     out.append(f"系统代理: {sys_proxy or '无'}")
     out.append(
         f'数据源:   {apply_network(settings)}（config.toml [network] proxy = "{settings.network.proxy}"）'
+    )
+    out.append(
+        f"资金流:   日频来源 {flow_source}，盘中分段来源 eastmoney（config.toml [data] flow_source）"
     )
 
     section("进程与锁")
@@ -306,7 +310,7 @@ def build_report(
         from moneytool.scheduler.jobs import clock_drift_seconds  # noqa: PLC0415
 
         probe = settings.model_copy(deep=True)
-        for name in ("eastmoney", "baostock", "shenwan", "csindex"):
+        for name in ("sina", "eastmoney", "baostock", "shenwan", "csindex"):
             limit = getattr(probe.rate_limit, name)
             limit.backoff_seconds = ()
             limit.timeout_seconds = min(limit.timeout_seconds, 15.0)
@@ -325,10 +329,15 @@ def build_report(
                 elif h["source"].startswith("eastmoney") and (
                     "RemoteDisconnected" in err or "502" in err
                 ):
+                    impact = (
+                        "日频资金流由新浪提供不受影响，只缺盘中分段近似值"
+                        if flow_source == "sina"
+                        else "程序会自动暂停并逐次延长间隔；若反复出现，"
+                        "调大 [backfill] flow_interval_seconds 或把 [data] flow_source 改为 sina"
+                    )
                     problems.append(
                         f"数据源 {h['source']} 断开连接：通常是请求过于频繁、本机 IP 被东财临时封禁"
-                        "（可持续数十分钟到数小时）。程序会自动暂停并逐次延长间隔，无需操作；"
-                        "若反复出现，调大 config.toml 的 [backfill] flow_interval_seconds"
+                        f"（可持续数十分钟到数小时）。{impact}"
                     )
                 elif h["source"] == "eastmoney实时":
                     problems.append(

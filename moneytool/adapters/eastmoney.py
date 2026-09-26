@@ -183,6 +183,7 @@ class EastmoneyAdapter:
         limiter: RateLimiter | None = None,
         *,
         retries: bool = True,
+        since: dt.date | None = None,
     ) -> pl.DataFrame:
         """`stock_individual_fund_flow(stock, market)`：该股最近约 120 个交易日的日频。
 

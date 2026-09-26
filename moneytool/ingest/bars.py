@@ -86,8 +86,9 @@ def mark_progress(
 ) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO backfill_progress (task, subject_id, status, last_date, attempts, updated_at) "
-        "VALUES (?, ?, ?, ?, COALESCE((SELECT attempts FROM backfill_progress WHERE task = ? AND subject_id = ?), 0) + 1, now())",
-        [task, code, status, last_date, task, code],
+        "VALUES (?, ?, ?, COALESCE(?, (SELECT last_date FROM backfill_progress WHERE task = ? AND subject_id = ?)), "
+        "COALESCE((SELECT attempts FROM backfill_progress WHERE task = ? AND subject_id = ?), 0) + 1, now())",
+        [task, code, status, last_date, task, code, task, code],
     )
 
 
