@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/vue-query";
 import { computed, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { api } from "./api/client";
+import SyncBanner from "./components/SyncBanner.vue";
 import { useTradeDateStore } from "./stores/tradeDate";
 
 const store = useTradeDateStore();
@@ -48,6 +49,7 @@ const linkQuery = computed(() => (store.isReplay ? { date: store.date, segment: 
 </script>
 
 <template>
+  <SyncBanner />
   <div v-if="gate" class="gate-banner">
     市场风控：暂停新增买入关注与低位企稳，原因：<router-link :to="{ name: 'market', query: linkQuery }">查看依据</router-link>
   </div>

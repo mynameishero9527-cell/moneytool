@@ -30,6 +30,34 @@ export interface Evidence {
 
 export type EvidenceMap = Record<string, Evidence[] | unknown>;
 
+export type LaneState = "waiting" | "running" | "paused" | "idle" | "unknown";
+
+export interface SyncLane {
+  label: string;
+  total: number;
+  done: number;
+  failed: number;
+  pending: number;
+  percent: number;
+  state: LaneState;
+  note: string;
+  resume_at: string | null;
+  batch_total: number;
+  batch_done: number;
+  rate_per_min: number | null;
+  eta_seconds: number | null;
+}
+
+export interface SyncData {
+  live: boolean;
+  stage: "starting" | "reference" | "backfill" | "catchup" | "ready" | "disabled" | "unknown";
+  stage_label: string;
+  complete: boolean;
+  eta_seconds: number | null;
+  catchup: { total: number; done: number };
+  lanes: Record<"bars" | "flow", SyncLane>;
+}
+
 export interface StatusData {
   latest_confirmed: string | null;
   today: string;

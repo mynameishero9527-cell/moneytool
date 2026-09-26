@@ -12,6 +12,10 @@
 
   --c-intraday: #f59e0b;
   --c-missing: #9ca3af;
+  /* 进度条用蓝色，避开 A 股涨跌的红绿 */
+  --c-progress: #2563eb;
+  --c-progress-soft: #93c5fd;
+  --c-progress-done: #1e40af;
 
   /* 六阶段 */
   --stage-freeze: #93c5fd;

@@ -13,6 +13,7 @@ import type {
   SectorHistoryRow,
   SectorStageRow,
   StatusData,
+  SyncData,
   StockDetail,
   StockHistoryRow,
 } from "./types";
@@ -82,6 +83,7 @@ async function send<T>(method: "POST" | "DELETE", path: string, body?: unknown):
 
 export const api = {
   status: () => get<StatusData>("/status"),
+  sync: () => get<SyncData>("/sync"),
   search: (q: string) => get<SearchResult>("/search", { q }),
   marketOverview: (scope: DateScope) => get<MarketOverview | null>("/market/overview", scope),
   marketHistory: (days: number, end?: string | null) =>

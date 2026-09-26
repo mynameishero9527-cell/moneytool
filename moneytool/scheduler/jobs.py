@@ -51,6 +51,7 @@ from moneytool.lock import write_lock
 from moneytool.logging import get_logger
 from moneytool.notify import dispatch, pending_quiet, push
 from moneytool.report import close_brief, premarket_brief, save_brief
+from moneytool.scheduler.progress import SyncProgress, console_line, sync_overview
 from moneytool.storage.maintenance import backup_database, prune_intraday
 from moneytool.storage.repo import (
     is_trading_day,
@@ -81,6 +82,8 @@ class JobRunner:
         self.stop_event = threading.Event()
         self.flow_paused_until: dt.datetime | None = None
         self.flow_pause_streak = 0
+        self.flow_pause_reason = ""
+        self.progress = SyncProgress()
         cfg = ctx.settings.backfill
         self.flow_source = ctx.settings.data.flow_source
         self.flow_workers, interval = cfg.flow_pace(self.flow_source)
@@ -171,8 +174,10 @@ class JobRunner:
         with self.ctx.db.read() as conn:
             stale = reference_stale(conn, day)
         if stale:
+            self.progress.set_stage("reference")
             self.job_reference_sync(day)
         self.job_catchup()
+        self.progress.set_stage("backfill")
 
     def _concepts_if_empty(self) -> None:
         """概念成分走东财、逐板块拉，放在回补空闲时做，不挡住启动后的日线回补。"""
@@ -243,12 +248,16 @@ class JobRunner:
         def compute(d: dt.date) -> Callable[[duckdb.DuckDBPyConnection], PipelineResult]:
             return lambda conn: run(conn, self.ctx.params_for(d), d)
 
+        prev_stage = self.progress.begin_catchup(len(days)) if days else None
         for d in days:
             if self.stop_event.is_set():
                 break
             res = self.run_job("catchup", compute(d))
+            self.progress.catchup_tick()
             if res is not None:
                 done.append(d)
+        if prev_stage is not None:
+            self.progress.set_stage(prev_stage)
         if done:
 
             def forget(conn: duckdb.DuckDBPyConnection) -> int:
@@ -516,6 +525,8 @@ class JobRunner:
         todo = self._pending(BARS_TASK, n)
         if not todo:
             return 0
+        lane = self.progress.lanes["bars"]
+        lane.begin(len(todo))
         years = self.ctx.settings.data.backfill_years_bars
         try:
             results = fetch_bars(
@@ -525,11 +536,14 @@ class JobRunner:
                 end=day,
                 day=day,
                 should_stop=self.stop_event.is_set,
+                on_item=lane.tick,
             )
         except Exception as exc:
             log.error("backfill_fetch_failed", task=BARS_TASK, error=str(exc))
+            lane.end()
             return 0
         out = self.run_job("backfill", lambda conn: store_bars(conn, results, day))
+        lane.end()
         return out if isinstance(out, int) else 0
 
     def _flow_target(self, conn: duckdb.DuckDBPyConnection) -> dt.date | None:
@@ -549,6 +563,8 @@ class JobRunner:
             last = flow_last_dates(conn, todo)
         if not todo:
             return 0
+        lane = self.progress.lanes["flow"]
+        lane.begin(len(todo))
         since = day - dt.timedelta(days=365 * self.ctx.settings.data.backfill_years_flow)
         try:
             results = fetch_flow(
@@ -561,13 +577,16 @@ class JobRunner:
                 limiter=self.flow_limiter,
                 should_stop=self.stop_event.is_set,
                 on_stall=self._pause_flow,
+                on_item=lane.tick,
             )
         except Exception as exc:
             log.error("backfill_fetch_failed", task=TASK_FLOW, error=str(exc))
+            lane.end()
             return 0
         if any(not isinstance(r, AdapterError) for _, r in results):
             self.flow_pause_streak = 0
         out = self.run_job("backfill_flow", lambda conn: store_flow(conn, results, day, since))
+        lane.end()
         return out if isinstance(out, int) else 0
 
     def flow_paused(self) -> bool:
@@ -579,6 +598,7 @@ class JobRunner:
         minutes = min(FLOW_PAUSE_MINUTES * 2**self.flow_pause_streak, FLOW_PAUSE_MAX_MINUTES)
         self.flow_pause_streak += 1
         self.flow_paused_until = now_sh() + dt.timedelta(minutes=minutes)
+        self.flow_pause_reason = reason
         log.warning(
             "backfill_flow_paused",
             reason=reason,
@@ -596,6 +616,7 @@ class JobRunner:
             "bars": BackfillLane("bars", self._backfill_bars_batch),
             "flow": BackfillLane("flow", self._backfill_flow_batch, paused=self.flow_paused),
         }
+        reporter = ProgressReporter(self)
         threads = [
             threading.Thread(
                 target=self._lane_loop, args=(lane,), name=f"backfill-{lane.name}", daemon=True
@@ -617,6 +638,10 @@ class JobRunner:
                     self._concepts_if_empty()
                     self.job_catchup()
                     last_catchup = time.monotonic()
+                self.progress.set_stage("ready")
+            elif self.progress.stage == "ready":
+                self.progress.set_stage("backfill")
+            reporter.maybe_print()
             self.stop_event.wait(LANE_POLL_SECONDS)
         for t in threads:
             t.join(timeout=5)
@@ -624,8 +649,10 @@ class JobRunner:
     def _lane_loop(self, lane: BackfillLane) -> None:
         size = self.ctx.settings.backfill.batch
         while not self.stop_event.is_set():
+            live = self.progress.lanes[lane.name]
             if lane.paused():
                 lane.idle.clear()
+                live.pause(self.flow_pause_reason, self.flow_paused_until)
                 self.stop_event.wait(LANE_POLL_SECONDS)
                 continue
             try:
@@ -638,7 +665,35 @@ class JobRunner:
                 self.stop_event.wait(1)
             else:
                 lane.idle.set()
+                live.idle()
                 self.stop_event.wait(LANE_IDLE_SECONDS)
+
+
+class ProgressReporter:
+    """回补期间每分钟在控制台（start.bat 窗口）打印一行进度；全部补完时打印一次“已完成”。"""
+
+    def __init__(self, runner: JobRunner, every: float = 60.0) -> None:
+        self.runner = runner
+        self.every = every
+        self._last = 0.0
+        self._ready_printed = False
+
+    def maybe_print(self) -> None:
+        now = time.monotonic()
+        ready = self.runner.progress.stage == "ready"
+        if ready and self._ready_printed:
+            return
+        if not ready and now - self._last < self.every:
+            return
+        try:
+            with self.runner.ctx.db.read() as conn:
+                ov = sync_overview(conn, self.runner.progress.snapshot())
+        except Exception as exc:
+            log.warning("progress_print_failed", error=str(exc))
+            return
+        self._last = now
+        self._ready_printed = ready
+        print(console_line(ov, now_sh()), flush=True)
 
 
 class BackfillLane:

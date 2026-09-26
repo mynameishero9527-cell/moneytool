@@ -123,8 +123,10 @@ def fetch_bars(
     end: dt.date,
     day: dt.date,
     should_stop: Callable[[], bool] | None = None,
+    on_item: Callable[[str], None] | None = None,
 ) -> list[BarsResult]:
-    """只拉数据不写库（可在写锁外执行）。Baostock 会话不支持并发，逐只顺序拉。"""
+    """只拉数据不写库（可在写锁外执行）。Baostock 会话不支持并发，逐只顺序拉。
+    每拉完一只（成功或失败）调用 `on_item(code)`，供进度显示。"""
     out: list[BarsResult] = []
     for code in codes:
         if should_stop and should_stop():
@@ -132,10 +134,11 @@ def fetch_bars(
         try:
             k = ad.baostock.kdata(code, start, end, day)
             adj = ad.baostock.adjust_factor(code, start, end, day)
+            out.append((code, (k, adj)))
         except AdapterError as exc:
             out.append((code, exc))
-            continue
-        out.append((code, (k, adj)))
+        if on_item:
+            on_item(code)
     return out
 
 

@@ -166,6 +166,8 @@ def _run(
         scheduler = build_scheduler(runner)
         scheduler.start()
         start_backfill_thread(runner)
+    else:
+        runner.progress.set_stage("disabled")
 
     fastapi_app = create_app(ctx.db, ctx=ctx, runner=runner, token=token)
     url = f"http://{listen}:{listen_port}"

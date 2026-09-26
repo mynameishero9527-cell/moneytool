@@ -4,10 +4,11 @@ import { computed } from "vue";
 import { api } from "../api/client";
 import { SEGMENT_LABEL, STATUS_LABEL } from "../charts/format";
 import EmptyState from "../components/EmptyState.vue";
+import SyncPanel from "../components/SyncPanel.vue";
 import { useTradeDateStore } from "../stores/tradeDate";
 
 const store = useTradeDateStore();
-const status = useQuery({ queryKey: ["status"], queryFn: api.status });
+const status = useQuery({ queryKey: ["status"], queryFn: api.status, refetchInterval: 30_000 });
 const quality = useQuery({
   queryKey: computed(() => ["quality", store.date]),
   queryFn: () => api.quality(store.date),
@@ -18,12 +19,6 @@ const qualityRows = computed(() =>
   store.isReplay ? ((quality.data.value?.data ?? []) as { source: string; endpoint: string; segment: string; status: string; reason: string | null; created_at: string }[]) : (s.value?.quality ?? []),
 );
 const ALL_SEGMENTS = ["auction", "0930_1030", "1030_1130", "1300_1400", "1400_1430", "1430_1500", "close"];
-const progress = (task: string) => {
-  const p = s.value?.backfill[task] ?? {};
-  const total = p["total"] ?? 0;
-  const done = p["done"] ?? 0;
-  return { total, done, failed: p["failed"] ?? 0, pending: p["pending"] ?? 0, ratio: total ? done / total : 0 };
-};
 </script>
 
 <template>
@@ -45,14 +40,8 @@ const progress = (task: string) => {
         </span>
       </div>
 
-      <div class="section-title">回补进度</div>
-      <div class="grid grid-2">
-        <div v-for="task in ['bars', 'flow_daily']" :key="task" class="card">
-          <b>{{ task === "bars" ? "日线（5 年）" : "日频资金流" }}</b>
-          <div class="bar"><span :style="{ width: progress(task).ratio * 100 + '%' }" /></div>
-          <div class="muted">完成 {{ progress(task).done }} / {{ progress(task).total }} · 待补 {{ progress(task).pending }} · 失败 {{ progress(task).failed }} · 日线 {{ s.counts["bar_days"] }} 日 · 资金 {{ s.counts["flow_days"] }} 日</div>
-        </div>
-      </div>
+      <div class="section-title">数据同步 <span class="muted small">已入库：日线 {{ s.counts["bar_days"] }} 个交易日 · 资金流 {{ s.counts["flow_days"] }} 个交易日</span></div>
+      <SyncPanel />
 
       <div class="section-title">质量记录{{ store.isReplay ? `（${store.date}）` : "（今日）" }}</div>
       <EmptyState v-if="!qualityRows.length" reason="无质量事件记录" />
@@ -78,17 +67,8 @@ const progress = (task: string) => {
   gap: 6px;
   flex-wrap: wrap;
 }
-.bar {
-  height: 8px;
-  border: 1px solid var(--c-border);
-  border-radius: 3px;
-  margin: 6px 0;
-  overflow: hidden;
-  background: #fff;
-}
-.bar span {
-  display: block;
-  height: 100%;
-  background: var(--c-text);
+.small {
+  font-size: 12px;
+  font-weight: 400;
 }
 </style>

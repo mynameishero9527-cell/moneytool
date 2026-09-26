@@ -14,6 +14,7 @@ from moneytool.api.schemas import Envelope, Meta, RecomputeRequest, StatusData
 from moneytool.app import today_sh
 from moneytool.ingest.flow import segments_captured
 from moneytool.params import latest_params
+from moneytool.scheduler.progress import sync_overview
 from moneytool.storage.repo import is_trading_day, latest_confirmed_date, quality_for_date
 from moneytool.types import DataStatus
 
@@ -64,6 +65,15 @@ def status(conn: duckdb.DuckDBPyConnection = Depends(get_ro_conn)) -> Envelope:
     )
     meta = Meta(trade_date=latest, status=DataStatus(data_status) if latest else DataStatus.MISSING)
     return Envelope(meta=meta, data=data.model_dump())
+
+
+@router.get("/sync", response_model=Envelope)
+def sync(request: Request, conn: duckdb.DuckDBPyConnection = Depends(get_ro_conn)) -> Envelope:
+    """数据同步进度：各路完成数、当前批、速度、预计剩余时间、暂停原因（页面每几秒轮询）。"""
+    runner = getattr(request.app.state, "runner", None)
+    live = runner.progress.snapshot() if runner is not None else None
+    data = sync_overview(conn, live)
+    return Envelope(meta=Meta(trade_date=None, status=DataStatus.CONFIRMED), data=data)
 
 
 @router.get("/quality", response_model=Envelope)

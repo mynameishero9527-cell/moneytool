@@ -295,6 +295,7 @@ def fetch_flow(
     should_stop: Callable[[], bool] | None = None,
     on_stall: Callable[[str], None] | None = None,
     max_consecutive_failures: int = 3,
+    on_item: Callable[[str], None] | None = None,
 ) -> list[FlowResult]:
     """只拉数据不写库（可在写锁外执行）。`workers` 个线程并发，请求节奏由共享的 `limiter` 控制。
     `source` 为适配器名（sina / eastmoney）；`since` 给出各股已有数据的最后一天，只取之后的行。
@@ -309,9 +310,15 @@ def fetch_flow(
     stall: list[str] = []
 
     def one(code: str) -> FlowResult | None:
-        nonlocal failures
         if halt.is_set() or (should_stop and should_stop()):
             return None
+        res = fetch_one(code)
+        if on_item:
+            on_item(code)
+        return res
+
+    def fetch_one(code: str) -> FlowResult:
+        nonlocal failures
         try:
             hist = adapter.flow_daily_stock(
                 code, day, limiter=limiter, retries=False, since=last.get(code)
