@@ -13,7 +13,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wai
 from pathlib import Path
 from typing import Any
 
-from moneytool.adapters.base import AdapterError
+from moneytool.adapters.base import AdapterError, SourceBlockedError
 from moneytool.ingest.bars import ADJ_FROM, BarsResult, Ranges
 from moneytool.logging import get_logger
 
@@ -82,9 +82,15 @@ class BarsPool:
         out: list[BarsResult] = []
         todo = list(codes)
         running: set[Future[BarsResult]] = set()
+        blocked = False
         try:
             while todo or running:
-                while todo and len(running) < self.workers and not (should_stop and should_stop()):
+                while (
+                    todo
+                    and not blocked
+                    and len(running) < self.workers
+                    and not (should_stop and should_stop())
+                ):
                     code = todo.pop(0)
                     a, b = (ranges or {}).get(code, (start, end))
                     running.add(pool.submit(_fetch_one, code, a, b, day))
@@ -93,6 +99,7 @@ class BarsPool:
                 finished, running = wait(running, timeout=5, return_when=FIRST_COMPLETED)
                 for fut in finished:
                     done_code, res = fut.result()
+                    blocked = blocked or isinstance(res, SourceBlockedError)
                     out.append((done_code, res))
                     if on_item:
                         on_item(done_code)

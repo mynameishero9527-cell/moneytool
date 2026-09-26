@@ -6,6 +6,7 @@ import datetime as dt
 import importlib
 import socket
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -14,6 +15,7 @@ import polars as pl
 from moneytool.adapters.base import (
     AdapterError,
     FetchContext,
+    SourceBlockedError,
     code_to_baostock,
     normalize_code,
     retry,
@@ -25,17 +27,30 @@ SOURCE = "baostock"
 log = get_logger(__name__)
 
 K_FIELDS = "date,code,open,high,low,close,preclose,volume,amount,turn,tradestatus,pctChg,isST"
+BLACKLIST_CODE = "10001011"
+BLOCK_COOLDOWN_SECONDS = 1800
+BLACKLIST_HINT = (
+    "Baostock 已把本机 IP 列入黑名单（多为短时间内登录 / 请求过多），通常数小时到一天后自动解除；"
+    "期间日线回补暂停，当日日线改用收盘快照近似"
+)
+
+
+class QueryError(AdapterError):
+    def __init__(self, code: str, msg: str) -> None:
+        super().__init__(SOURCE, "query", f"{code} {msg}")
+        self.code = code
+        self.msg = msg
 
 
 def _rows(rs: Any) -> pl.DataFrame:
     """ResultData → DataFrame（全部 Utf8，再由调用方 cast）。"""
     if rs.error_code != "0":
-        raise AdapterError(SOURCE, "query", f"{rs.error_code} {rs.error_msg}")
+        raise QueryError(str(rs.error_code), str(rs.error_msg))
     data: list[list[str]] = []
     while rs.next():
         data.append(rs.get_row_data())
     if rs.error_code != "0":  # 翻页请求失败时 next() 返回 False，不能当作数据已取完
-        raise AdapterError(SOURCE, "query", f"{rs.error_code} {rs.error_msg}")
+        raise QueryError(str(rs.error_code), str(rs.error_msg))
     fields: list[str] = list(rs.fields)
     if not data:
         return pl.DataFrame({f: pl.Series(f, [], dtype=pl.Utf8) for f in fields})
@@ -87,6 +102,7 @@ class BaostockAdapter:
         self._bs = bs
         self._logged_in = False
         self._lock = threading.RLock()
+        self._blocked_until = 0.0
 
     @property
     def bs(self) -> Any:
@@ -96,13 +112,29 @@ class BaostockAdapter:
             self._bs = baostock
         return self._bs
 
+    def _check_blocked(self, endpoint: str) -> None:
+        left = self._blocked_until - time.monotonic()
+        if left > 0:
+            raise SourceBlockedError(
+                SOURCE, endpoint, f"{BLACKLIST_HINT}（本进程约 {left / 60:.0f} 分钟后再试）"
+            )
+
+    def _raise_for(self, endpoint: str, code: str, msg: str) -> None:
+        if code == BLACKLIST_CODE:
+            # 黑名单期间每次登录都会被记一次，继续重试只会延长封禁：本进程冷却期内不再触网
+            self._blocked_until = time.monotonic() + BLOCK_COOLDOWN_SECONDS
+            log.warning("baostock_blacklisted", endpoint=endpoint, error=f"{code} {msg}")
+            raise SourceBlockedError(SOURCE, endpoint, f"{code} {msg}：{BLACKLIST_HINT}")
+        raise AdapterError(SOURCE, endpoint, f"{code} {msg}")
+
     def _ensure_login(self) -> None:
         with self._lock:
             if self._logged_in:
                 return
+            self._check_blocked("login")
             lg = self.bs.login()
             if getattr(lg, "error_code", "0") != "0":
-                raise AdapterError(SOURCE, "login", f"{lg.error_code} {lg.error_msg}")
+                self._raise_for("login", str(lg.error_code), str(lg.error_msg))
             self._guard_socket()
             self._logged_in = True
 
@@ -150,8 +182,10 @@ class BaostockAdapter:
         day: dt.date,
         query: Callable[[], Any],
         std: Callable[[pl.DataFrame], pl.DataFrame],
+        *,
+        cache: bool = True,
     ) -> pl.DataFrame:
-        cached = self.ctx.cache.get(SOURCE, endpoint, day, params)
+        cached = self.ctx.cache.get(SOURCE, endpoint, day, params) if cache else None
         if cached is not None:
             out: pl.DataFrame = std(cached)
             BAOSTOCK[endpoint].validate(out, SOURCE, endpoint)
@@ -163,6 +197,10 @@ class BaostockAdapter:
                 self.ctx.limiter.wait()
                 try:
                     return _rows(query())
+                except QueryError as exc:
+                    self._drop_session()
+                    self._raise_for(endpoint, exc.code, exc.msg)
+                    raise
                 except Exception:
                     self._drop_session()
                     raise
@@ -279,7 +317,21 @@ class BaostockAdapter:
     def health(self, day: dt.date) -> dict[str, Any]:
         started = dt.datetime.now()
         try:
-            df = self.trade_dates(day - dt.timedelta(days=10), day, day)
+            start = day - dt.timedelta(days=10)
+            # 不读缓存：否则被封时也显示正常
+            df = self._run(
+                "trade_dates",
+                {"start": start.isoformat(), "end": day.isoformat(), "probe": True},
+                day,
+                lambda: self.bs.query_trade_dates(
+                    start_date=start.isoformat(), end_date=day.isoformat()
+                ),
+                lambda d: d.select(
+                    _d("calendar_date").alias("trade_date"),
+                    (pl.col("is_trading_day") == "1").alias("is_open"),
+                ),
+                cache=False,
+            )
             ms = int((dt.datetime.now() - started).total_seconds() * 1000)
             return {
                 "source": SOURCE,

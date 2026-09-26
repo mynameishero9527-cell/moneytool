@@ -10,7 +10,7 @@ from typing import Any
 import duckdb
 import polars as pl
 
-from moneytool.adapters.base import AdapterError
+from moneytool.adapters.base import AdapterError, SourceBlockedError
 from moneytool.adapters.registry import Adapters
 from moneytool.logging import get_logger
 from moneytool.storage.repo import record_quality, upsert
@@ -237,6 +237,8 @@ def fetch_bars(
             out.append((code, (k, adj)))
         except AdapterError as exc:
             out.append((code, exc))
+            if isinstance(exc, SourceBlockedError):
+                break
         if on_item:
             on_item(code)
     return out
@@ -273,8 +275,21 @@ def store_bars(
     """写日线并记进度。`ranges` 为各股本次拉取的区间；覆盖起点早于 `full_start`（最后一层起点）
     即记为 done，否则为 partial（近期已有、更早的还在补）。"""
     done = 0
+    blocked = next((r for _, r in results if isinstance(r, SourceBlockedError)), None)
+    if blocked is not None:
+        # 数据源整体封禁不是个股的问题：只记一条，不计入各股失败次数（否则解封后这些股票会被跳过）
+        record_quality(
+            conn,
+            source="baostock",
+            endpoint=blocked.endpoint,
+            trade_date=day,
+            status=QualityStatus.MISSING,
+            reason=str(blocked),
+        )
     for code, res in results:
         rng = (ranges or {}).get(code)
+        if isinstance(res, SourceBlockedError):
+            continue
         if isinstance(res, AdapterError):
             record_quality(
                 conn,

@@ -398,6 +398,13 @@ def build_report(
                         f"数据源 {h['source']} 断开连接：通常是请求过于频繁、本机 IP 被东财临时封禁"
                         f"（可持续数十分钟到数小时）。{impact}"
                     )
+                elif h["source"] == "baostock" and "10001011" in err:
+                    problems.append(
+                        "Baostock 把本机 IP 列入了黑名单（10001011，多为短时间内登录 / 请求过多）："
+                        "通常数小时到一天后自动解除。期间程序暂停日线回补（1 小时起、逐次翻倍到 12 小时再试），"
+                        "不再反复登录；已补的近期日线可正常使用，当日日线收盘后改用新浪快照近似。"
+                        "别反复重启程序，每次启动都会重新登录"
+                    )
                 elif h["source"] == "eastmoney实时":
                     problems.append(
                         f"东财实时排名接口（push2.eastmoney.com）不可用：{fallback}"

@@ -13,7 +13,7 @@ from typing import Any
 import duckdb
 import polars as pl
 
-from moneytool.adapters.base import AdapterError, AdaptiveLimiter
+from moneytool.adapters.base import AdapterError, AdaptiveLimiter, SourceBlockedError
 from moneytool.app import AppContext, now_sh, today_sh
 from moneytool.compute.labels import compute_labels
 from moneytool.compute.pipeline import HISTORY_DAYS, PipelineResult, run
@@ -78,6 +78,8 @@ FLOW_READY_HOUR = 18  # 新浪日频资金流当日数据可用的大致时刻�
 FLOW_REFRESH_HOURS = 6
 LANE_POLL_SECONDS = 60
 LANE_IDLE_SECONDS = 600  # 一路没有待办后隔多久再查（资金流每日增量靠它触发）
+BARS_PAUSE_MINUTES = 60
+BARS_PAUSE_MAX_MINUTES = 720
 CATCHUP_EVERY_SECONDS = 1800  # 同一只股票两次增量尝试的最小间隔，源端未更新时不反复请求
 TIER_DONE_KEY = "bars_tier_done"
 STORE_WAIT_SECONDS = 1800
@@ -92,6 +94,9 @@ class JobRunner:
         self.flow_paused_until: dt.datetime | None = None
         self.flow_pause_streak = 0
         self.flow_pause_reason = ""
+        self.bars_paused_until: dt.datetime | None = None
+        self.bars_pause_streak = 0
+        self.bars_pause_reason = ""
         self.progress = SyncProgress()
         cfg = ctx.settings.backfill
         self.flow_source = ctx.settings.data.flow_source
@@ -228,19 +233,18 @@ class JobRunner:
         try:
             fetched = fetch_concepts(self.ctx.adapters, day, max_boards=60, existing=existing)
         except AdapterError as exc:
-            reason = str(exc)
-            source = exc.source
+            error = exc
 
             def fail(conn: duckdb.DuckDBPyConnection) -> int:
                 record_quality(
                     conn,
-                    source=source,
+                    source=error.source,
                     endpoint="concept_list",
                     trade_date=day,
                     status=QualityStatus.MISSING,
-                    reason=reason,
+                    reason=str(error),
                 )
-                return 0
+                raise error
 
             self.run_job("concept_sync", fail)
             return 0
@@ -414,10 +418,13 @@ class JobRunner:
         sample = conn.execute(
             "SELECT code FROM security WHERE NOT is_delisting ORDER BY code LIMIT 1"
         ).fetchone()
-        if sample is None:
+        if sample is None or self.bars_paused():
             return False
         try:
             k = self.ctx.adapters.baostock.kdata(sample[0], day, day, day)
+        except SourceBlockedError as exc:
+            self._pause_bars(exc.reason)
+            return False
         except AdapterError:
             return False
         if k.is_empty():
@@ -624,6 +631,11 @@ class JobRunner:
             log.error("backfill_fetch_failed", task=BARS_TASK, error=str(exc))
             lane.end()
             return 0
+        blocked = next((r for _, r in results if isinstance(r, SourceBlockedError)), None)
+        if blocked is not None:
+            self._pause_bars(blocked.reason)
+        elif any(not isinstance(r, AdapterError) for _, r in results):
+            self.bars_pause_streak = 0
         out = self.run_store(
             "backfill",
             lambda conn: store_bars(conn, results, day, ranges=ranges, full_start=tiers[-1].start),
@@ -753,6 +765,22 @@ class JobRunner:
     def flow_paused(self) -> bool:
         return self.flow_paused_until is not None and now_sh() < self.flow_paused_until
 
+    def bars_paused(self) -> bool:
+        return self.bars_paused_until is not None and now_sh() < self.bars_paused_until
+
+    def _pause_bars(self, reason: str) -> None:
+        """Baostock 黑名单：期间继续登录会被一直记着，暂停 1 → 2 → 4 … 最长 12 小时，一个请求都不发。"""
+        minutes = min(BARS_PAUSE_MINUTES * 2**self.bars_pause_streak, BARS_PAUSE_MAX_MINUTES)
+        self.bars_pause_streak += 1
+        self.bars_paused_until = now_sh() + dt.timedelta(minutes=minutes)
+        self.bars_pause_reason = "Baostock 暂时封禁本机 IP，日线回补暂停"
+        log.warning(
+            "backfill_bars_paused",
+            reason=reason[:200],
+            minutes=minutes,
+            until=self.bars_paused_until.isoformat(timespec="minutes"),
+        )
+
     def _pause_flow(self, reason: str) -> None:
         """东财封 IP 通常持续几十分钟到数小时：连续暂停时时长翻倍（30 → 60 → 120 … 最长 4 小时），
         期间一个请求都不发，等封禁自然解除；恢复后有成功请求即重置。"""
@@ -774,8 +802,18 @@ class JobRunner:
         资金流暂停期间不补算，免得整段历史都落成价格模式。"""
         self.job_startup_check()
         lanes = {
-            "bars": BackfillLane("bars", self._backfill_bars_batch),
-            "flow": BackfillLane("flow", self._backfill_flow_batch, paused=self.flow_paused),
+            "bars": BackfillLane(
+                "bars",
+                self._backfill_bars_batch,
+                paused=self.bars_paused,
+                pause_info=lambda: (self.bars_pause_reason, self.bars_paused_until),
+            ),
+            "flow": BackfillLane(
+                "flow",
+                self._backfill_flow_batch,
+                paused=self.flow_paused,
+                pause_info=lambda: (self.flow_pause_reason, self.flow_paused_until),
+            ),
         }
         reporter = ProgressReporter(self)
         threads = [
@@ -827,7 +865,7 @@ class JobRunner:
             live = self.progress.lanes[lane.name]
             if lane.paused():
                 lane.idle.clear()
-                live.pause(self.flow_pause_reason, self.flow_paused_until)
+                live.pause(*lane.pause_info())
                 self.stop_event.wait(LANE_POLL_SECONDS)
                 continue
             try:
@@ -879,10 +917,12 @@ class BackfillLane:
         name: str,
         batch: Callable[[dt.date, int], int],
         paused: Callable[[], bool] | None = None,
+        pause_info: Callable[[], tuple[str, dt.datetime | None]] | None = None,
     ) -> None:
         self.name = name
         self.batch = batch
         self.paused = paused or (lambda: False)
+        self.pause_info = pause_info or (lambda: ("", None))
         self.idle = threading.Event()
         self._lock = threading.Lock()
         self._progress = 0
