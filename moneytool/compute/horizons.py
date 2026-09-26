@@ -128,6 +128,7 @@ def horizon_wide(sector_feat: pl.DataFrame, market: pl.DataFrame, p: Params) -> 
     r = p.windows.min_valid_ratio
     df = _base(sector_feat, market).with_columns(
         _g=(1 + pl.col("pct").fill_null(0.0)).cum_prod().over("sector_id"),
+        _i=pl.int_range(pl.len()).over("sector_id"),
         _in=pl.when(pl.col("net").is_null())
         .then(None)
         .otherwise((pl.col("net") > 0).cast(pl.Float64)),
@@ -140,14 +141,21 @@ def horizon_wide(sector_feat: pl.DataFrame, market: pl.DataFrame, p: Params) -> 
     cols: list[pl.Expr] = []
     for key, n, _ in HORIZONS:
         ms = min_samples(n, r)
+        # 样本达到窗口的 60% 就出数，与净流入同一门槛；不满整窗时用已有区间的累计涨跌。
+        if n == 1:
+            ret = pl.col("pct")
+        else:
+            ret = (
+                pl.when(pl.col("_i") >= n)
+                .then(pl.col("_g") / pl.col("_g").shift(n).over("sector_id") - 1)
+                .when(pl.col("_i") + 1 >= ms)
+                .then(pl.col("_g") - 1)
+                .otherwise(None)
+            )
         cols += [
             pl.col("net").rolling_sum(n, min_samples=ms).over("sector_id").alias(f"net_{key}"),
             pl.col("amt").rolling_sum(n, min_samples=ms).over("sector_id").alias(f"amt_{key}"),
-            (
-                pl.col("pct")
-                if n == 1
-                else (pl.col("_g") / pl.col("_g").shift(n).over("sector_id") - 1)
-            ).alias(f"ret_{key}"),
+            ret.alias(f"ret_{key}"),
             pl.col("_in").rolling_mean(n, min_samples=ms).over("sector_id").alias(f"inflow_{key}"),
         ]
     df = df.with_columns(cols)

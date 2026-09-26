@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import polars as pl
+import pytest
 from fastapi.testclient import TestClient
 
 from moneytool.api.server import create_app
@@ -80,6 +81,22 @@ def test_horizon_sums_and_ranks(params: Params) -> None:
     )
     assert m["fr_5d"] is None
     assert abs(m["net_5d"] - market["net_main_all"].tail(5).sum()) < 1e-3
+
+
+def test_partial_window_return_uses_available_days(params: Params) -> None:
+    """历史不满整窗、但达到 60% 时，涨跌与净流入覆盖同一段，不把涨跌留空。"""
+    n_days = 80
+    feat, market = _frames(n_days=n_days)
+    wide = horizon_wide(feat, market, params)
+    day = feat["trade_date"].max()
+    a = wide.filter((pl.col("sector_id") == "A") & (pl.col("trade_date") == day)).row(0, named=True)
+    raw = feat.filter(pl.col("sector_id") == "A").sort("trade_date")
+    growth = 1.0
+    for r in raw["sector_pct_chg"]:
+        growth *= 1 + r
+    assert a["net_120d"] == pytest.approx(raw["sector_net_main"].sum())
+    assert a["ret_120d"] == pytest.approx(growth - 1)
+    assert a["ret_250d"] is None and a["net_250d"] is None
 
 
 def test_trend_direction_and_consistency(params: Params) -> None:

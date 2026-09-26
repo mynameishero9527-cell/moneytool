@@ -4,7 +4,7 @@ import { computed, ref } from "vue";
 import { api } from "../api/client";
 import type { Stage } from "../api/types";
 import { marketHistoryOption } from "../charts/options";
-import { REGIME_LABEL, STAGE_COLOR, STAGE_LABEL, STAGE_ORDER, pct, yi } from "../charts/format";
+import { REGIME_LABEL, STAGE_COLOR, STAGE_LABEL, STAGE_ORDER, pct, signClass, yi } from "../charts/format";
 import EmptyState from "../components/EmptyState.vue";
 import EvidenceCard from "../components/EvidenceCard.vue";
 import FlowSignalFeed from "../components/FlowSignalFeed.vue";
@@ -46,11 +46,11 @@ const pressureLabel = (v: number | null) => (v === null ? "历史不足" : v >= 
     <template v-else>
       <div class="grid grid-4">
         <div class="card stat">
-          <span class="value" :class="data.eqw_ret && data.eqw_ret > 0 ? 'up' : 'down'">{{ pct(data.eqw_ret, 2, true) }}</span>
+          <span class="value" :class="signClass(data.eqw_ret)">{{ pct(data.eqw_ret, 2, true) }}</span>
           <span class="label">全市场等权涨跌（5 日 {{ pct(data.eqw_ret_5d, 2, true) }}）</span>
         </div>
         <div class="card stat">
-          <span class="value" :class="data.net_main_all && data.net_main_all > 0 ? 'up' : 'down'">{{ yi(data.net_main_all) }} 亿</span>
+          <span class="value" :class="signClass(data.net_main_all)">{{ yi(data.net_main_all) }} 亿</span>
           <span class="label">全市场主力净流入 · 成交 {{ yi(data.amount_all, 0) }} 亿</span>
         </div>
         <div class="card stat">

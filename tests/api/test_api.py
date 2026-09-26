@@ -194,6 +194,84 @@ def test_marks_and_watchlist_roundtrip(client: TestClient) -> None:
     assert client.get("/api/watchlist").json()["data"] == []
 
 
+def test_watchlist_sector_metrics_come_from_features(
+    client: TestClient, seeded: tuple[Database, list[dt.date]]
+) -> None:
+    """板块自选不能去 flow_daily 按代码找，涨跌和资金在板块特征里。"""
+    db, dates = seeded
+    day = dates[-1]
+    with db.write() as conn:
+        expected = conn.execute(
+            """
+            SELECT TRY_CAST(json_extract(features, '$.sector_pct_chg') AS DOUBLE),
+                   TRY_CAST(json_extract(features, '$.sector_net_main') AS DOUBLE),
+                   TRY_CAST(json_extract(features, '$.sector_main_ratio') AS DOUBLE)
+            FROM feature_daily
+            WHERE subject_type = 'sector' AND subject_id = 'sw:801000'
+              AND trade_date = ? AND segment = 'close'
+            """,
+            [day],
+        ).fetchone()
+        stock = conn.execute(
+            """
+            SELECT b.pct_chg, b.close, f.net_main,
+                   TRY_CAST(json_extract(fd.features, '$.main_ratio') AS DOUBLE)
+            FROM bar_daily b
+            JOIN flow_daily f ON f.code = b.code AND f.trade_date = b.trade_date
+            LEFT JOIN feature_daily fd ON fd.subject_type = 'stock' AND fd.subject_id = b.code
+                 AND fd.trade_date = b.trade_date AND fd.segment = 'close'
+            WHERE b.code = '000002.SZ' AND b.trade_date = ?
+            """,
+            [day],
+        ).fetchone()
+    assert expected is not None and stock is not None
+    assert client.post("/api/watchlist/sw:801000").status_code == 201
+    assert client.post("/api/watchlist/000002.SZ").status_code == 201
+    rows = {w["code"]: w for w in client.get("/api/watchlist").json()["data"]}
+    sector = rows["sw:801000"]
+    assert sector["kind"] == "sector"
+    assert sector["pct_chg"] == pytest.approx(expected[0])
+    assert sector["net_main"] == pytest.approx(expected[1])
+    assert sector["main_ratio"] == pytest.approx(expected[2])
+    assert rows["000002.SZ"]["kind"] == "stock"
+    assert rows["000002.SZ"]["pct_chg"] == pytest.approx(stock[0])
+    assert rows["000002.SZ"]["close"] == pytest.approx(stock[1])
+    assert rows["000002.SZ"]["net_main"] == pytest.approx(stock[2])
+    assert rows["000002.SZ"]["main_ratio"] == pytest.approx(stock[3])
+
+
+def test_tracking_return_uses_adjust_factor(
+    client: TestClient, seeded: tuple[Database, list[dt.date]]
+) -> None:
+    """除权后原始收盘会看起来下跌；至今收益按复权价，与事后统计一致。"""
+    db, dates = seeded
+    entered, last = dates[-3], dates[-1]
+    with db.write() as conn:
+        version = conn.execute(
+            "SELECT param_version FROM market_daily WHERE trade_date = ? AND segment = 'close'",
+            [last],
+        ).fetchone()
+        assert version is not None
+        conn.execute(
+            "UPDATE bar_daily SET close = 10, adj_factor = 1 WHERE code = '000001.SZ' AND trade_date = ?",
+            [entered],
+        )
+        conn.execute(
+            "UPDATE bar_daily SET close = 6, adj_factor = 2 WHERE code = '000001.SZ' AND trade_date = ?",
+            [last],
+        )
+        conn.execute(
+            "INSERT INTO tracking (list_type, code, sector_id, entered_date, param_version, entered_price) "
+            "VALUES ('buy', '000001.SZ', 'sw:801000', ?, ?, 10)",
+            [entered, version[0]],
+        )
+    row = client.get("/api/tracking").json()["data"][0]
+    assert row["code"] == "000001.SZ"
+    assert row["ret_since"] == pytest.approx(0.2)
+    assert row["excess_vs_eqw"] is not None
+    assert row["excess_vs_sector"] is not None
+
+
 def test_search(client: TestClient) -> None:
     r = client.get("/api/search?q=000001").json()["data"]
     assert r["stocks"][0]["code"] == "000001.SZ"

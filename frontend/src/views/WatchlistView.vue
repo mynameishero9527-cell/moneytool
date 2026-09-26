@@ -30,10 +30,23 @@ const sectors = computed(() => rows.value.filter((r) => r.kind === "sector"));
     <template v-else>
       <div v-if="sectors.length" class="section-title">板块</div>
       <table v-if="sectors.length" class="dt">
+        <thead>
+          <tr>
+            <th>板块</th>
+            <th class="num">涨跌</th>
+            <th class="num">主力净流入 亿</th>
+            <th class="num">净占比</th>
+            <th>加入</th>
+            <th />
+          </tr>
+        </thead>
         <tbody>
           <tr v-for="s in sectors" :key="s.code" class="clickable" @click="$router.push({ name: 'sector', params: { id: s.code }, query: $route.query })">
             <td>{{ s.name ?? s.code }}<span class="code">{{ s.code }}</span></td>
-            <td class="muted">加入于 {{ s.added_at.slice(0, 10) }}</td>
+            <td class="num" :class="signClass(s.pct_chg)">{{ pct(s.pct_chg, 2, true) }}</td>
+            <td class="num" :class="signClass(s.net_main)">{{ yi(s.net_main) }}</td>
+            <td class="num" :class="signClass(s.main_ratio)">{{ pct(s.main_ratio, 2) }}</td>
+            <td class="muted">{{ s.added_at.slice(0, 10) }}</td>
             <td style="width: 60px"><a href="#" @click.prevent.stop="remove.mutate(s.code)">移除</a></td>
           </tr>
         </tbody>

@@ -48,6 +48,13 @@ const mark = useMutation({
 });
 const MARK_LABEL: Record<string, string> = { bought: "已买入", sold: "已卖出", ignored: "忽略" };
 
+const flowRatio = computed(() => {
+  const src = detail.data.value?.data.flow?.main_ratio;
+  if (typeof src === "number") return src;
+  const feat = detail.data.value?.data.features?.main_ratio;
+  return typeof feat === "number" ? feat : null;
+});
+
 const keyFeatures = [
   ["main_ratio", "净占比", "pct"],
   ["main_mean_5d", "5 日均值 亿", "yi"],
@@ -102,7 +109,7 @@ const openAction = ref<string | null>(null);
         </div>
         <div class="card stat">
           <span class="value" :class="signClass(d.flow?.net_main as number | null)">{{ yi(d.flow?.net_main as number | null) }} 亿</span>
-          <span class="label">主力净流入 · 净占比 {{ pct(d.flow?.main_ratio as number | null, 2) }}<span v-if="d.flow && d.flow.reconciled === false" class="tag unreconciled" style="margin-left: 6px">未对账</span><span v-if="!d.flow" class="tag missing" style="margin-left: 6px">缺失</span></span>
+          <span class="label">主力净流入 · 净占比 {{ pct(flowRatio, 2) }}<span v-if="d.flow && d.flow.reconciled === false" class="tag unreconciled" style="margin-left: 6px">未对账</span><span v-if="!d.flow" class="tag missing" style="margin-left: 6px">缺失</span></span>
         </div>
         <div class="card stat">
           <span class="value">{{ d.profile?.score ?? "—" }}<small v-if="d.profile?.score_tier"> {{ d.profile.score_tier }}</small></span>

@@ -81,7 +81,7 @@ export function sectorHistoryOption(rows: SectorHistoryRow[]): ChartOption {
   };
 }
 
-/** 市场序列：等权收益累计 + 全市场净流入柱 + 风控开关区间 */
+/** 市场序列：等权收益累计 + 全市场净流入柱 + 情绪压力（0–100 独立轴）+ 风控开关区间 */
 export function marketHistoryOption(rows: MarketHistoryRow[]): ChartOption {
   let cum = 1;
   const eqw = rows.map((r) => {
@@ -98,13 +98,29 @@ export function marketHistoryOption(rows: MarketHistoryRow[]): ChartOption {
     }
   });
   return {
-    tooltip: { trigger: "axis" },
+    tooltip: {
+      trigger: "axis",
+      formatter: (params: unknown) => {
+        const ps = params as { dataIndex: number }[];
+        const i = ps[0]?.dataIndex ?? 0;
+        const r = rows[i];
+        if (!r) return "";
+        const pressure = r.market_pressure === null ? "—" : String(r.market_pressure);
+        return [
+          `<b>${r.trade_date}</b>${r.risk_gate ? "　风控开启" : ""}`,
+          `全市场主力净流入 ${yi(r.net_main_all)} 亿`,
+          `等权累计收益 ${((eqw[i] ?? 0) * 100).toFixed(2)}%`,
+          `情绪压力 ${pressure}`,
+        ].join("<br/>");
+      },
+    },
     legend: { top: 0, textStyle: { fontSize: 11 } },
-    grid: GRID,
+    grid: { ...GRID, right: 108 },
     xAxis: { type: "category", data: rows.map((r) => r.trade_date), ...AXIS },
     yAxis: [
       { type: "value", name: "净流入 亿", ...AXIS, splitLine: { lineStyle: { color: "#F3F4F6" } } },
       { type: "value", name: "等权累计", ...AXIS, splitLine: { show: false }, axisLabel: { formatter: (v: number) => `${(v * 100).toFixed(0)}%`, fontSize: 11 } },
+      { type: "value", name: "压力", min: 0, max: 100, position: "right", offset: 52, ...AXIS, splitLine: { show: false } },
     ],
     series: [
       {
@@ -114,7 +130,7 @@ export function marketHistoryOption(rows: MarketHistoryRow[]): ChartOption {
         markArea: { silent: true, data: gateAreas },
       },
       { type: "line", name: "等权累计收益", yAxisIndex: 1, data: eqw, showSymbol: false, lineStyle: { color: "#111827", width: 1.5 } },
-      { type: "line", name: "情绪压力", yAxisIndex: 1, data: rows.map((r) => (r.market_pressure === null ? null : r.market_pressure / 100)), showSymbol: false, lineStyle: { color: "#A855F7", width: 1, type: "dotted" } },
+      { type: "line", name: "情绪压力", yAxisIndex: 2, data: rows.map((r) => r.market_pressure), showSymbol: false, lineStyle: { color: "#A855F7", width: 1, type: "dotted" } },
     ],
   };
 }

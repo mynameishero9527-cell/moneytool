@@ -87,7 +87,10 @@ def actions(
 def tracking(
     active_only: bool = True, conn: duckdb.DuckDBPyConnection = Depends(get_ro_conn)
 ) -> Envelope:
-    """跟踪中：入选日与价格、至今收益及相对全 A 等权 / 依据板块的超额、当前角色与动作标签（需求 8.3）。"""
+    """跟踪中：入选日与价格、至今收益及相对全 A 等权 / 依据板块的超额、当前角色与动作标签（需求 8.3）。
+
+    至今收益用复权收盘（收盘 × 复权因子），与事后统计同一口径；因子都为 1 时与不复权相同。
+    """
     day = resolve_trade_date(conn, None)
     meta = make_meta(conn, day)
     if day is None:
@@ -113,15 +116,21 @@ def tracking(
             GROUP BY ALL
         )
         SELECT t.*, s.name, sec.name AS sector_name, b.close AS last_close,
-               b.close / NULLIF(t.entered_price, 0) - 1 AS ret_since,
-               b.close / NULLIF(t.entered_price, 0) - 1 - eqw.eqw_since AS excess_vs_eqw,
-               b.close / NULLIF(t.entered_price, 0) - 1 - sec_ret.sector_since AS excess_vs_sector,
+               (b.close * coalesce(b.adj_factor, 1))
+                 / NULLIF(t.entered_price * coalesce(eb.adj_factor, 1), 0) - 1 AS ret_since,
+               (b.close * coalesce(b.adj_factor, 1))
+                 / NULLIF(t.entered_price * coalesce(eb.adj_factor, 1), 0) - 1
+                 - eqw.eqw_since AS excess_vs_eqw,
+               (b.close * coalesce(b.adj_factor, 1))
+                 / NULLIF(t.entered_price * coalesce(eb.adj_factor, 1), 0) - 1
+                 - sec_ret.sector_since AS excess_vs_sector,
                r.role AS current_role,
                (SELECT list(DISTINCT a.list_type) FROM action_list_confirmed a WHERE a.code = t.code
                  AND a.trade_date = ? AND a.param_version = t.param_version) AS current_actions
         FROM t
         LEFT JOIN security s ON s.code = t.code
         LEFT JOIN sector sec ON sec.sector_id = t.sector_id
+        LEFT JOIN bar_daily eb ON eb.code = t.code AND eb.trade_date = t.entered_date
         LEFT JOIN bar_daily b ON b.code = t.code AND b.trade_date = coalesce(t.exited_date, ?)
         LEFT JOIN eqw ON eqw.list_type = t.list_type AND eqw.code = t.code AND eqw.sector_id = t.sector_id
              AND eqw.entered_date = t.entered_date
@@ -174,21 +183,41 @@ def watchlist(
     trade_date: dt.date | None = None, conn: duckdb.DuckDBPyConnection = Depends(get_ro_conn)
 ) -> Envelope:
     day = resolve_trade_date(conn, trade_date)
+    meta = make_meta(conn, day)
+    # 个股收盘、涨跌以日线为准（与个股页一致），资金在 flow_daily；
+    # 板块没有资金流行，涨跌和资金在 feature_daily。净占比缺来源时用净流入 / 成交额。
     df = conn.execute(
         """
         SELECT w.code, w.group_id, w.added_at, coalesce(s.name, sec.name) AS name,
                CASE WHEN sec.sector_id IS NULL THEN 'stock' ELSE 'sector' END AS kind,
-               f.net_main, f.main_ratio, f.pct_chg, f.close, h.eval AS hold_eval,
+               coalesce(f.net_main, TRY_CAST(json_extract(sf.features, '$.sector_net_main') AS DOUBLE)) AS net_main,
+               coalesce(
+                   f.main_ratio,
+                   TRY_CAST(json_extract(stf.features, '$.main_ratio') AS DOUBLE),
+                   TRY_CAST(json_extract(sf.features, '$.sector_main_ratio') AS DOUBLE)
+               ) AS main_ratio,
+               coalesce(
+                   b.pct_chg,
+                   f.pct_chg,
+                   TRY_CAST(json_extract(sf.features, '$.sector_pct_chg') AS DOUBLE)
+               ) AS pct_chg,
+               coalesce(b.close, f.close) AS close,
+               h.eval AS hold_eval,
                json_extract_string(h.evidence, '$.text') AS hold_text
         FROM watchlist w LEFT JOIN security s ON s.code = w.code
         LEFT JOIN sector sec ON sec.sector_id = w.code
+        LEFT JOIN bar_daily b ON b.code = w.code AND b.trade_date = ?
         LEFT JOIN flow_daily f ON f.code = w.code AND f.trade_date = ?
+        LEFT JOIN feature_daily sf ON sf.subject_type = 'sector' AND sf.subject_id = w.code
+             AND sf.trade_date = ? AND sf.segment = 'close' AND sf.param_version = ?
+        LEFT JOIN feature_daily stf ON stf.subject_type = 'stock' AND stf.subject_id = w.code
+             AND stf.trade_date = ? AND stf.segment = 'close' AND stf.param_version = ?
         LEFT JOIN hold_eval h ON h.code = w.code AND h.trade_date = ?
         ORDER BY w.group_id, w.added_at
         """,
-        [day, day],
+        [day, day, day, meta.param_version, day, meta.param_version, day],
     ).pl()
-    return Envelope(meta=make_meta(conn, day), data=rows(df))
+    return Envelope(meta=meta, data=rows(df))
 
 
 @router.post("/watchlist/{code}", response_model=Envelope, status_code=201)
