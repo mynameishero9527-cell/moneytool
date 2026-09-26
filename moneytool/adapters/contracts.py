@@ -83,7 +83,12 @@ EASTMONEY: dict[str, Contract] = {
         columns={
             "code": pl.Utf8(),
             "name": pl.Utf8(),
+            "open": pl.Float64(),
+            "high": pl.Float64(),
+            "low": pl.Float64(),
             "close": pl.Float64(),
+            "pre_close": pl.Float64(),
+            "volume": pl.Float64(),
             "pct_chg": pl.Float64(),
             "amount": pl.Float64(),
             "turnover": pl.Float64(),
@@ -92,7 +97,7 @@ EASTMONEY: dict[str, Contract] = {
         },
         required_non_null=("code",),
         min_rows=3000,
-        unit_notes="换手率源为百分数已 /100；市值 元。",
+        unit_notes="换手率与涨跌幅源为百分数已 /100；市值 元；成交量 股（东财源为手已 ×100）；昨收为交易所除权后价。",
     ),
     "hist": Contract(
         columns={

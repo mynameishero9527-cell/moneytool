@@ -52,13 +52,19 @@ def capture_segment(
     day: dt.date,
     segment: str,
     captured_at: dt.datetime,
+    *,
+    stock: pl.DataFrame | AdapterError | None = None,
 ) -> dict[str, int]:
-    """拉一次今日累计并落 flow_snapshot。返回各主体行数；失败的主体写 data_quality 并跳过。"""
+    """拉一次今日累计并落 flow_snapshot。返回各主体行数；失败的主体写 data_quality 并跳过。
+    `stock` 可在写锁外先拉好传入，避免翻页请求占着写库锁。"""
     counts: dict[str, int] = {}
     try:
-        source, stock = ad.flow_rank_stock(day, segment)
-        if source != "eastmoney":
-            log.info("realtime_flow_source", source=source, segment=segment, rows=stock.height)
+        if isinstance(stock, AdapterError):
+            raise stock
+        if stock is None:
+            source, stock = ad.flow_rank_stock(day, segment)
+            if source != "eastmoney":
+                log.info("realtime_flow_source", source=source, segment=segment, rows=stock.height)
         snap = stock.select(
             pl.lit("stock").alias("subject_type"),
             pl.col("code").alias("subject_id"),
@@ -156,10 +162,15 @@ def rebuild_intraday(conn: duckdb.DuckDBPyConnection, day: dt.date) -> tuple[int
 
 
 def confirm_from_snapshot(
-    conn: duckdb.DuckDBPyConnection, ad: Adapters, day: dt.date, captured_at: dt.datetime
+    conn: duckdb.DuckDBPyConnection,
+    ad: Adapters,
+    day: dt.date,
+    captured_at: dt.datetime,
+    *,
+    stock: pl.DataFrame | AdapterError | None = None,
 ) -> int:
     """收盘后拉一次「今日」累计作为当日正式值写 flow_daily（reconciled=False）。"""
-    counts = capture_segment(conn, ad, day, CLOSE_SEGMENT, captured_at)
+    counts = capture_segment(conn, ad, day, CLOSE_SEGMENT, captured_at, stock=stock)
     if counts.get("stock", 0) == 0:
         return 0
     snap = conn.execute(

@@ -130,6 +130,40 @@ _COVERED = (
 )
 
 
+ADJ_SENTINEL = dt.date(1900, 1, 1)
+
+
+def pending_adjust(conn: duckdb.DuckDBPyConnection, codes: list[str]) -> set[str]:
+    """哪些股票还没取过复权因子历史。取一次就从上市起全量留存，补更早的层时直接复用，不再请求。"""
+    if not codes:
+        return set()
+    have = {
+        str(r[0])
+        for r in conn.execute(
+            "SELECT DISTINCT code FROM adjust_factor WHERE code IN "
+            f"({', '.join('?' for _ in codes)})",
+            codes,
+        ).fetchall()
+    }
+    return {c for c in codes if c not in have}
+
+
+def store_adjust(conn: duckdb.DuckDBPyConnection, code: str, adj: pl.DataFrame) -> None:
+    """留存该股的因子历史；没有除权事件时也写哨兵行，避免以后反复请求。"""
+    rows = adj.filter(pl.col("effective_date").is_not_null() & pl.col("adj_factor").is_not_null())
+    sentinel = pl.DataFrame({"code": [code], "effective_date": [ADJ_SENTINEL], "adj_factor": [1.0]})
+    keep = rows.select("code", "effective_date", "adj_factor") if not rows.is_empty() else None
+    upsert(conn, "adjust_factor", sentinel if keep is None else pl.concat([sentinel, keep]))
+
+
+def adjust_history(conn: duckdb.DuckDBPyConnection, code: str) -> pl.DataFrame:
+    return conn.execute(
+        "SELECT code, effective_date, adj_factor FROM adjust_factor WHERE code = ? "
+        "ORDER BY effective_date",
+        [code],
+    ).pl()
+
+
 def tier_pending(
     conn: duckdb.DuckDBPyConnection, tier_start: dt.date, day: dt.date, limit: int
 ) -> Ranges:
@@ -205,11 +239,18 @@ def backfill_bars(
     if limit is not None:
         todo = todo[:limit]
     ranges = {c: (start, end) for c in todo}
-    results = fetch_bars(ad, todo, start=start, end=end, day=day, should_stop=should_stop)
-    return store_bars(conn, results, day, ranges=ranges, full_start=start)
+    adj_codes = pending_adjust(conn, todo)
+    results = fetch_bars(
+        ad, todo, start=start, end=end, day=day, adj_codes=adj_codes, should_stop=should_stop
+    )
+    return store_bars(conn, results, day, ranges=ranges, full_start=start, adj_fetched=adj_codes)
 
 
 BarsResult = tuple[str, tuple[pl.DataFrame, pl.DataFrame] | AdapterError]
+# 不取复权因子时的占位：store_bars 会沿用库里已有的因子
+EMPTY_ADJUST = pl.DataFrame(
+    schema={"code": pl.Utf8(), "effective_date": pl.Date(), "adj_factor": pl.Float64()}
+)
 
 
 def fetch_bars(
@@ -220,11 +261,13 @@ def fetch_bars(
     end: dt.date,
     day: dt.date,
     ranges: Ranges | None = None,
+    adj_codes: set[str] | None = None,
     should_stop: Callable[[], bool] | None = None,
     on_item: Callable[[str], None] | None = None,
 ) -> list[BarsResult]:
     """只拉数据不写库（可在写锁外执行）。Baostock 会话不支持并发，逐只顺序拉。
-    `ranges` 给出各股自己的区间（分层回补），缺省用 [start, end]。
+    `ranges` 给出各股自己的区间（分层回补），缺省用 [start, end]；
+    `adj_codes` 给出本次要取复权因子的股票，缺省全取。
     每拉完一只（成功或失败）调用 `on_item(code)`，供进度显示。"""
     out: list[BarsResult] = []
     for code in codes:
@@ -233,7 +276,11 @@ def fetch_bars(
         a, b = (ranges or {}).get(code, (start, end))
         try:
             k = ad.baostock.kdata(code, a, b, day)
-            adj = ad.baostock.adjust_factor(code, ADJ_FROM, day, day)
+            adj = (
+                ad.baostock.adjust_factor(code, ADJ_FROM, day, day)
+                if adj_codes is None or code in adj_codes
+                else EMPTY_ADJUST
+            )
             out.append((code, (k, adj)))
         except AdapterError as exc:
             out.append((code, exc))
@@ -271,6 +318,7 @@ def store_bars(
     *,
     ranges: Ranges | None = None,
     full_start: dt.date | None = None,
+    adj_fetched: set[str] | None = None,
 ) -> int:
     """写日线并记进度。`ranges` 为各股本次拉取的区间；覆盖起点早于 `full_start`（最后一层起点）
     即记为 done，否则为 partial（近期已有、更早的还在补）。"""
@@ -307,10 +355,12 @@ def store_bars(
             "done" if full_start is None or (cov is not None and cov <= full_start) else "partial"
         )
         k, adj = res
+        if not adj.is_empty() or code in (adj_fetched or ()):
+            store_adjust(conn, code, adj)
         if k.is_empty():
             mark_progress(conn, TASK, code, status, None)
             continue
-        bars = bars_with_adjust(k, adj)
+        bars = bars_with_adjust(k, adjust_history(conn, code))
         upsert(conn, "bar_daily", bars)
         # 补更早一层时区间不含近期，最后日期沿用已有值
         newest: dt.date = bars["trade_date"].max()  # type: ignore[assignment]
@@ -340,27 +390,61 @@ def update_float_mv(
     return spot.height
 
 
+SNAP_OPTIONAL = ("open", "high", "low", "volume", "pre_close", "adj_factor")
+
+
 def daily_bars_from_snapshot(
-    snapshot: pl.DataFrame, trade_date: dt.date, prev_close: pl.DataFrame
+    snapshot: pl.DataFrame, trade_date: dt.date, prev: pl.DataFrame
 ) -> pl.DataFrame:
-    """价格模式 / 收盘当天日线未到时，用东财快照生成当日 bar_daily 行（架构 4.1.2）。"""
-    df = snapshot.join(prev_close, on="code", how="left")
+    """用全市场快照生成当日 bar_daily 行（架构 4.1.2）。全 A 行情快照带开高低与成交量时一并写入；
+    `prev` 为上一交易日的 (code, pre_close, adj_factor)：快照没给昨收时用它，复权因子沿用上一日
+    （除权当日由调用方单独取新因子）。"""
+    df = snapshot
+    for col in SNAP_OPTIONAL:
+        if col not in df.columns:
+            df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias(col))
+    prev = prev.rename({c: f"_prev_{c}" for c in prev.columns if c != "code"})
+    df = df.join(prev, on="code", how="left").with_columns(
+        pre_close=pl.coalesce("pre_close", "_prev_pre_close"),
+        adj_factor=pl.coalesce("adj_factor", "_prev_adj_factor"),
+    )
     up, down = _limit_prices(pl.col("pre_close"), pl.col("code"), pl.col("name").str.contains("ST"))
     return df.select(
         "code",
         pl.lit(trade_date).alias("trade_date"),
-        pl.lit(None, dtype=pl.Float64).alias("open"),
-        pl.lit(None, dtype=pl.Float64).alias("high"),
-        pl.lit(None, dtype=pl.Float64).alias("low"),
+        "open",
+        "high",
+        "low",
         "close",
         "pre_close",
-        pl.lit(None, dtype=pl.Float64).alias("volume"),
+        "volume",
         "amount",
         "turnover",
         "pct_chg",
-        pl.lit(None, dtype=pl.Float64).alias("adj_factor"),
+        "adj_factor",
         up.alias("limit_up"),
         down.alias("limit_down"),
         "float_mv",
         (pl.col("amount").fill_null(0.0) == 0).alias("is_suspended"),
+    )
+
+
+def restated_codes(snapshot: pl.DataFrame, prev: pl.DataFrame, tol: float = 0.005) -> list[str]:
+    """快照昨收与库里上一交易日收盘不一致的股票：除权除息、拆并股等，复权因子需要重取。
+    交易所给的昨收是除权后价，因此这一比较就能免费筛出当天有公司行为的少数股票。"""
+    if "pre_close" not in snapshot.columns or prev.is_empty():
+        return []
+    df = snapshot.select("code", "pre_close").join(
+        prev.select("code", _close="pre_close"), on="code", how="inner"
+    )
+    diff = (pl.col("pre_close") - pl.col("_close")).abs()
+    return (
+        df.filter(
+            pl.col("pre_close").is_not_null()
+            & pl.col("_close").is_not_null()
+            & (pl.col("_close") > 0)
+            & (diff > tol * pl.col("_close"))
+        )["code"]
+        .unique()
+        .to_list()
     )

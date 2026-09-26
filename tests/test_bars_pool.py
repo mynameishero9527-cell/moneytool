@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import multiprocessing as mp
 import pickle
 from pathlib import Path
 
@@ -11,6 +12,31 @@ import pytest
 from moneytool.adapters.base import AdapterError, CaptchaError
 from moneytool.config import load_settings
 from moneytool.ingest.bars_pool import BarsPool
+
+
+def test_shared_pace_spaces_requests() -> None:
+    import threading
+    import time
+
+    from moneytool.ingest.bars_pool import SharedPace
+
+    ctx = mp.get_context("spawn")
+    pace = SharedPace(ctx.Lock(), ctx.Value("d", 0.0), 0.05)
+    starts: list[float] = []
+    guard = threading.Lock()
+
+    def once() -> None:
+        pace.wait()
+        with guard:
+            starts.append(time.monotonic())
+
+    threads = [threading.Thread(target=once) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    gaps = [b - a for a, b in zip(sorted(starts), sorted(starts)[1:], strict=False)]
+    assert min(gaps) >= 0.04
 
 
 def test_adapter_errors_survive_pickle() -> None:

@@ -309,13 +309,19 @@ class EastmoneyAdapter:
     # ---- 行情 ----
 
     def spot(self, day: dt.date) -> pl.DataFrame:
-        """`stock_zh_a_spot_em()`：全 A 实时快照，用于证券表、流通市值、名称与 ST 标记。"""
+        """`stock_zh_a_spot_em()`：全 A 实时快照。一次请求即得全市场开高低收、成交额与市值，
+        当日日线由它生成，不必逐只请求 Baostock。"""
 
         def std(df: pl.DataFrame) -> pl.DataFrame:
             return df.select(
                 pl.col("代码").map_elements(normalize_code, return_dtype=pl.Utf8).alias("code"),
                 pl.col("名称").cast(pl.Utf8).alias("name"),
+                _num("今开").alias("open"),
+                _num("最高").alias("high"),
+                _num("最低").alias("low"),
                 _num("最新价").alias("close"),
+                _num("昨收").alias("pre_close"),
+                (_num("成交量") * 100.0).alias("volume"),  # 东财源为手
                 _pct("涨跌幅").alias("pct_chg"),
                 _num("成交额").alias("amount"),
                 _pct("换手率").alias("turnover"),

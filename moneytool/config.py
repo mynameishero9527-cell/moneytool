@@ -60,7 +60,9 @@ class SourceRateLimit(BaseModel):
 class RateLimitConfig(BaseModel):
     eastmoney: SourceRateLimit = SourceRateLimit()
     baostock: SourceRateLimit = SourceRateLimit(
-        min_interval_seconds=0.2, per_stock_interval_seconds=0.2
+        # 多进程共用这一间隔（见 BarsPool），不是每个进程各算一份
+        min_interval_seconds=0.5,
+        per_stock_interval_seconds=0.5,
     )
     shenwan: SourceRateLimit = SourceRateLimit(min_interval_seconds=1.0)
     csindex: SourceRateLimit = SourceRateLimit(min_interval_seconds=1.0)

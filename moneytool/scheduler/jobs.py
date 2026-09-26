@@ -17,19 +17,23 @@ from moneytool.adapters.base import AdapterError, AdaptiveLimiter, SourceBlocked
 from moneytool.app import AppContext, now_sh, today_sh
 from moneytool.compute.labels import compute_labels
 from moneytool.compute.pipeline import HISTORY_DAYS, PipelineResult, run
-from moneytool.ingest.bars import TASK as BARS_TASK
 from moneytool.ingest.bars import (
+    ADJ_FROM,
     Tier,
     backfill_bars,
     bars_tiers,
     daily_bars_from_snapshot,
     fetch_bars,
+    pending_adjust,
     reset_tier_failures,
+    restated_codes,
+    store_adjust,
     store_bars,
     tier_counts,
     tier_pending,
     update_float_mv,
 )
+from moneytool.ingest.bars import TASK as BARS_TASK
 from moneytool.ingest.bars_pool import BarsPool
 from moneytool.ingest.flow import (
     CLOSE_SEGMENT,
@@ -75,7 +79,7 @@ log = get_logger(__name__)
 FLOW_PAUSE_MINUTES = 30
 FLOW_PAUSE_MAX_MINUTES = 240
 FLOW_READY_HOUR = 18  # 新浪日频资金流当日数据可用的大致时刻（北京时间）
-FLOW_REFRESH_HOURS = 6
+FLOW_REFRESH_HOURS = 20  # 同一交易日的增量最多拉一轮，避免全市场反复请求
 LANE_POLL_SECONDS = 60
 LANE_IDLE_SECONDS = 600  # 一路没有待办后隔多久再查（资金流每日增量靠它触发）
 BARS_PAUSE_MINUTES = 60
@@ -83,6 +87,8 @@ BARS_PAUSE_MAX_MINUTES = 720
 CATCHUP_EVERY_SECONDS = 1800  # 同一只股票两次增量尝试的最小间隔，源端未更新时不反复请求
 TIER_DONE_KEY = "bars_tier_done"
 STORE_WAIT_SECONDS = 1800
+MISSING_BARS_LIMIT = 200  # 当日日线由快照生成后，逐只补的上限（除权股票与快照缺漏）
+CONCEPT_REFRESH_DAYS = 7  # 概念成分变动不频繁，每周重拉一次，不必每个交易日逐板块请求
 
 
 class JobRunner:
@@ -103,7 +109,13 @@ class JobRunner:
         self.flow_workers, interval = cfg.flow_pace(self.flow_source)
         self.flow_limiter = AdaptiveLimiter(interval, cfg.flow_max_interval_seconds)
         self.bars_pool = (
-            BarsPool(ctx.settings.data_dir, cfg.bars_workers) if cfg.bars_workers > 1 else None
+            BarsPool(
+                ctx.settings.data_dir,
+                cfg.bars_workers,
+                ctx.settings.rate_limit.baostock.min_interval_seconds,
+            )
+            if cfg.bars_workers > 1
+            else None
         )
 
     def run_job(
@@ -216,6 +228,16 @@ class JobRunner:
             has = self._concept_source(conn)
         if not has:
             self._sync_concepts(day)
+
+    @staticmethod
+    def _concepts_due(conn: duckdb.DuckDBPyConnection, day: dt.date) -> bool:
+        """没有概念成分，或最近一次快照早于 CONCEPT_REFRESH_DAYS，才重新拉。"""
+        row = conn.execute(
+            "SELECT max(m.snapshot_date) FROM sector_member_snapshot m "
+            "JOIN sector s USING (sector_id) WHERE s.level = 'concept'"
+        ).fetchone()
+        latest = None if row is None else row[0]
+        return latest is None or (day - latest).days >= CONCEPT_REFRESH_DAYS
 
     @staticmethod
     def _concept_source(conn: duckdb.DuckDBPyConnection) -> str | None:
@@ -348,11 +370,13 @@ class JobRunner:
     def job_segment(self, segment: str) -> PipelineResult | None:
         day = today_sh()
         ad = self.ctx.adapters
-
-        def work(conn: duckdb.DuckDBPyConnection) -> PipelineResult | None:
+        with self.ctx.db.read() as conn:
             if not is_trading_day(conn, day):
                 return None
-            counts = capture_segment(conn, ad, day, segment, now_sh())
+        flow = self._fetch_flow_rank(day, segment)
+
+        def work(conn: duckdb.DuckDBPyConnection) -> PipelineResult | None:
+            counts = capture_segment(conn, ad, day, segment, now_sh(), stock=flow)
             if counts.get("stock", 0) == 0:
                 return None
             rebuild_intraday(conn, day)
@@ -369,23 +393,36 @@ class JobRunner:
     def job_close_confirm(self, force: bool = False) -> PipelineResult | None:
         day = today_sh()
         ad = self.ctx.adapters
-
-        def work(conn: duckdb.DuckDBPyConnection) -> PipelineResult | None:
+        with self.ctx.db.read() as conn:
             if not is_trading_day(conn, day):
                 return None
             if setting_get(conn, f"confirmed:{day.isoformat()}") == "1" and not force:
                 return None
-            # 1) 当日日线：Baostock 日线到位则全量回补当日，否则用东财收盘快照生成近似日线
-            bars_ready = self._bars_ready(conn, day)
+        # 全 A 快照与今日资金流都在写锁外拉：新浪要翻页，不能占着锁挡住回补落库
+        spot, spot_error = self._fetch_spot(day)
+        flow = self._fetch_flow_rank(day, CLOSE_SEGMENT)
+
+        def work(conn: duckdb.DuckDBPyConnection) -> PipelineResult | None:
+            if spot_error is not None:
+                record_quality(
+                    conn,
+                    source=spot_error.source,
+                    endpoint="spot",
+                    trade_date=day,
+                    status=QualityStatus.MISSING,
+                    reason=str(spot_error)[:300],
+                )
+            # 1) 当日日线由全 A 快照生成（一次请求全市场），除权与快照缺漏的少数股票再走 Baostock；
+            #    两家快照都不可用时才退回逐只拉
+            bars_ready = self._daily_bars(conn, day, spot) or self._bars_ready(conn, day)
             if not bars_ready:
                 deadline = now_sh().time() >= dt.time.fromisoformat(
                     self.ctx.settings.schedule.confirm_deadline
                 )
                 if not deadline and not force:
                     return None
-            # 2) 当日正式资金流 = 收盘后最后一次「今日」累计；同时拉全 A 快照写流通市值与换手
-            spot = self._spot(conn, day)
-            n = confirm_from_snapshot(conn, ad, day, now_sh())
+            # 2) 当日正式资金流 = 收盘后最后一次「今日」累计
+            n = confirm_from_snapshot(conn, ad, day, now_sh(), stock=flow)
             if n == 0:
                 record_quality(
                     conn,
@@ -397,7 +434,7 @@ class JobRunner:
                     reason="收盘累计拉取失败",
                 )
             if not bars_ready:
-                self._bars_from_snapshot(conn, day, spot)
+                self._bars_from_snapshot(conn, day)
             if spot is not None:
                 update_float_mv(conn, spot, day)
             # 3) 计算与存档 → 提醒 → 收盘简报
@@ -444,24 +481,104 @@ class JobRunner:
         )
         return True
 
-    def _spot(self, conn: duckdb.DuckDBPyConnection, day: dt.date) -> pl.DataFrame | None:
+    def _fetch_flow_rank(self, day: dt.date, segment: str) -> pl.DataFrame | AdapterError:
         try:
-            return self.ctx.adapters.spot(day)[1]
+            return self.ctx.adapters.flow_rank_stock(day, segment)[1]
         except AdapterError as exc:
-            record_quality(
-                conn,
-                source=exc.source,
-                endpoint="spot",
-                trade_date=day,
-                status=QualityStatus.MISSING,
-                reason=str(exc)[:300],
-            )
-            return None
+            return exc
 
-    def _bars_from_snapshot(
+    def _fetch_spot(self, day: dt.date) -> tuple[pl.DataFrame | None, AdapterError | None]:
+        try:
+            return self.ctx.adapters.spot(day)[1], None
+        except AdapterError as exc:
+            return None, exc
+
+    @staticmethod
+    def _prev_bars(conn: duckdb.DuckDBPyConnection, day: dt.date) -> pl.DataFrame:
+        """上一交易日的收盘与复权因子，用于补昨收、沿用复权因子、识别除权。"""
+        return conn.execute(
+            "SELECT code, close AS pre_close, adj_factor FROM bar_daily "
+            "WHERE trade_date = (SELECT max(trade_date) FROM bar_daily WHERE trade_date < ?)",
+            [day],
+        ).pl()
+
+    def _daily_bars(
         self, conn: duckdb.DuckDBPyConnection, day: dt.date, spot: pl.DataFrame | None
-    ) -> None:
-        """日线未到：优先用全 A 快照（成交额、换手、流通市值齐全），否则用资金流快照反推成交额。"""
+    ) -> bool:
+        """当日日线：全 A 快照一次请求即得全市场开高低收与成交额，按它写 bar_daily；
+        复权因子沿用上一交易日，只有当天除权（快照昨收与库里上一日收盘不一致）的少数股票
+        才向 Baostock 取新因子。相比逐只拉，请求量从上万降到几十。"""
+        if spot is None or spot.is_empty() or "open" not in spot.columns:
+            return False
+        prev = self._prev_bars(conn, day)
+        restated = restated_codes(spot, prev)
+        adj = self._adjust_factors(conn, restated, day) if restated else None
+        snap = spot.with_columns(pl.col("name").fill_null(""))
+        if adj is not None and not adj.is_empty():
+            snap = snap.join(adj, on="code", how="left").with_columns(
+                adj_factor=pl.col("_adj")
+            )  # 除权当日用新因子，其余留空由上一日沿用
+        bars = daily_bars_from_snapshot(snap, day, prev)
+        n = upsert(conn, "bar_daily", bars)
+        missing = [
+            r[0]
+            for r in conn.execute(
+                "SELECT s.code FROM security s LEFT JOIN bar_daily b "
+                "ON b.code = s.code AND b.trade_date = ? WHERE NOT s.is_delisting AND b.code IS NULL",
+                [day],
+            ).fetchall()
+        ]
+        if missing and not self.bars_paused():
+            # 快照不含北交所部分股票等少数缺漏：逐只补，数量有限
+            backfill_bars(
+                conn,
+                self.ctx.adapters,
+                start=day,
+                end=day,
+                day=day,
+                codes=missing[:MISSING_BARS_LIMIT],
+                should_stop=self.stop_event.is_set,
+            )
+        log.info(
+            "daily_bars_from_spot",
+            day=str(day),
+            rows=n,
+            restated=len(restated),
+            missing=len(missing),
+        )
+        return True
+
+    def _adjust_factors(
+        self, conn: duckdb.DuckDBPyConnection, codes: list[str], day: dt.date
+    ) -> pl.DataFrame | None:
+        """给除权股票取最新后复权因子（每只 1 次请求）。"""
+        rows: list[dict[str, Any]] = []
+        for code in codes[:MISSING_BARS_LIMIT]:
+            if self.stop_event.is_set() or self.bars_paused():
+                break
+            try:
+                df = self.ctx.adapters.baostock.adjust_factor(code, ADJ_FROM, day, day)
+            except SourceBlockedError as exc:
+                self._pause_bars(exc.reason)
+                break
+            except AdapterError as exc:
+                record_quality(
+                    conn,
+                    source="baostock",
+                    endpoint="adjust_factor",
+                    trade_date=day,
+                    status=QualityStatus.MISSING,
+                    reason=f"{code}: {exc.reason}"[:300],
+                )
+                continue
+            df = df.filter(pl.col("effective_date") <= day).sort("effective_date")
+            store_adjust(conn, code, df)
+            if not df.is_empty():
+                rows.append({"code": code, "_adj": float(df["adj_factor"][-1])})
+        return pl.DataFrame(rows, schema={"code": pl.Utf8, "_adj": pl.Float64}) if rows else None
+
+    def _bars_from_snapshot(self, conn: duckdb.DuckDBPyConnection, day: dt.date) -> None:
+        """全 A 快照也拿不到：用资金流快照反推成交额，生成价格模式的当日日线。"""
         snap = conn.execute(
             "SELECT s.subject_id AS code, sec.name, s.close, s.pct_chg, s.amount, "
             "NULL::DOUBLE AS turnover, NULL::DOUBLE AS float_mv "
@@ -469,16 +586,10 @@ class JobRunner:
             "WHERE s.trade_date = ? AND s.segment = ? AND s.subject_type = 'stock'",
             [day, CLOSE_SEGMENT],
         ).pl()
-        if spot is not None and not spot.is_empty():
-            snap = spot.select("code", "name", "close", "pct_chg", "amount", "turnover", "float_mv")
         if snap.is_empty():
             return
-        prev_close = conn.execute(
-            "SELECT code, close AS pre_close FROM bar_daily WHERE trade_date = (SELECT max(trade_date) FROM bar_daily WHERE trade_date < ?)",
-            [day],
-        ).pl()
         bars = daily_bars_from_snapshot(
-            snap.with_columns(pl.col("name").fill_null("")), day, prev_close
+            snap.with_columns(pl.col("name").fill_null("")), day, self._prev_bars(conn, day)
         )
         upsert(conn, "bar_daily", bars)
         record_quality(
@@ -487,7 +598,7 @@ class JobRunner:
             endpoint="kdata",
             trade_date=day,
             status=QualityStatus.STALE,
-            reason="当日日线未到，暂用东财收盘快照近似（次日自检覆盖）",
+            reason="当日日线与全 A 快照都未到，暂用资金流快照近似（次日自检覆盖）",
         )
 
     # ---- 夜间 ----
@@ -497,7 +608,8 @@ class JobRunner:
         ad = self.ctx.adapters
         with self.ctx.db.read() as conn:
             trading = is_trading_day(conn, day)
-        if trading:
+            concepts_due = trading and self._concepts_due(conn, day)
+        if concepts_due:
             self._sync_concepts(day)
 
         def work(conn: duckdb.DuckDBPyConnection) -> int:
@@ -599,6 +711,7 @@ class JobRunner:
                 ranges = tier_pending(conn, tier.start, day, n)
                 if ranges:
                     break
+            adj_codes = pending_adjust(conn, list(ranges))
         if not ranges:
             return 0
         todo = list(ranges)
@@ -613,6 +726,7 @@ class JobRunner:
                     end=end,
                     day=day,
                     ranges=ranges,
+                    adj_codes=adj_codes,
                     should_stop=self.stop_event.is_set,
                     on_item=lane.tick,
                 )
@@ -624,6 +738,7 @@ class JobRunner:
                     end=end,
                     day=day,
                     ranges=ranges,
+                    adj_codes=adj_codes,
                     should_stop=self.stop_event.is_set,
                     on_item=lane.tick,
                 )
@@ -638,7 +753,14 @@ class JobRunner:
             self.bars_pause_streak = 0
         out = self.run_store(
             "backfill",
-            lambda conn: store_bars(conn, results, day, ranges=ranges, full_start=tiers[-1].start),
+            lambda conn: store_bars(
+                conn,
+                results,
+                day,
+                ranges=ranges,
+                full_start=tiers[-1].start,
+                adj_fetched=adj_codes,
+            ),
         )
         lane.end()
         return out if isinstance(out, int) else 0

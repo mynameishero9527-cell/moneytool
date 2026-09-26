@@ -113,6 +113,8 @@ def test_tiers_fill_recent_first_then_extend(tmp_data_dir: Path) -> None:
     assert runner._backfill_bars_batch(DAY, 10) == 2
     k = [c for c in fake.calls if c[0] == "k"]
     assert {(c[2], c[3]) for c in k} == {(tiers[1].start, tiers[0].start - dt.timedelta(days=1))}
+    # 复权因子第一次已从上市起取全量，补更早的层不再请求
+    assert [c for c in fake.calls if c[0] == "adj"] == []
 
     fake.calls.clear()
     assert runner._backfill_bars_batch(DAY, 10) == 2

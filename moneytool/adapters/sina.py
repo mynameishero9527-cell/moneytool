@@ -97,7 +97,12 @@ def standardize_spot(raw: pl.DataFrame) -> pl.DataFrame:
         raw.select(
             pl.col("symbol").map_elements(sina_to_code, return_dtype=pl.Utf8).alias("code"),
             pl.col("name"),
+            _num("open").alias("open"),
+            _num("high").alias("high"),
+            _num("low").alias("low"),
             _num("trade").alias("close"),
+            _num("settlement").alias("pre_close"),
+            _num("volume").alias("volume"),
             (_num("changepercent") / 100.0).alias("pct_chg"),
             _num("amount").alias("amount"),
             (_num("turnoverratio") / 100.0).alias("turnover"),

@@ -57,7 +57,7 @@ def test_all_tables_created(db: Database) -> None:
 
 def test_migrate_is_idempotent(db: Database) -> None:
     assert migrate(db.rw) == []
-    assert applied_versions(db.rw) == {1, 2, 3, 4}
+    assert applied_versions(db.rw) == {1, 2, 3, 4, 5}
 
 
 def test_intraday_tables_have_segment(db: Database) -> None:
