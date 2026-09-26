@@ -1,7 +1,8 @@
-"""运行配置：`~/.moneytool/config.toml` + 环境变量 `MONEYTOOL_*`。架构 9 节。"""
+"""运行配置：`<数据目录>/config.toml` + 环境变量 `MONEYTOOL_*`。架构 9 节。"""
 
 from __future__ import annotations
 
+import os
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,22 @@ from typing import Any
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-DEFAULT_DATA_DIR = Path("~/.moneytool")
+LEGACY_DATA_DIR = Path("~/.moneytool")
+DATA_DIR_ENV = "MONEYTOOL_DATA__DIR"
+
+
+def project_root() -> Path | None:
+    """源码目录运行（`pip install -e .`）时返回仓库根目录，装进 site-packages 时返回 None。"""
+    root = Path(__file__).resolve().parent.parent
+    return root if (root / "pyproject.toml").exists() else None
+
+
+def _default_data_dir() -> Path:
+    root = project_root()
+    return root / "data" if root else LEGACY_DATA_DIR
+
+
+DEFAULT_DATA_DIR = _default_data_dir()
 
 
 class ServerConfig(BaseModel):
@@ -139,11 +155,13 @@ def _read_toml(path: Path) -> dict[str, Any]:
 
 
 def load_settings(data_dir: Path | None = None) -> Settings:
-    """读取配置。`data_dir` 显式给出时优先，其次 TOML 里的 `[data].dir`，最后默认。"""
-    base_dir = (data_dir or DEFAULT_DATA_DIR).expanduser()
+    """读取配置。数据目录：`data_dir` 参数 > 环境变量 `MONEYTOOL_DATA__DIR` > 项目目录下 `data/`。"""
+    explicit = data_dir or (
+        Path(os.environ[DATA_DIR_ENV]) if os.environ.get(DATA_DIR_ENV) else None
+    )
+    base_dir = (explicit or DEFAULT_DATA_DIR).expanduser()
     file_values = _read_toml(base_dir / "config.toml")
-    if data_dir is not None:
-        file_values.setdefault("data", {})["dir"] = str(base_dir)
+    file_values.setdefault("data", {})["dir"] = str(base_dir)
     return Settings(**file_values)
 
 

@@ -14,7 +14,9 @@ build/
 frontend/node_modules/
 frontend/dist/
 
-# 本地数据目录（默认 ~/.moneytool，若用 --data-dir 指到仓库内）
+# 本地数据目录（默认项目目录下 data/）
+/data/
+/data.moving/
 .moneytool/
 *.duckdb
 *.duckdb.wal

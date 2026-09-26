@@ -29,7 +29,7 @@ app.add_typer(params_app, name="params")
 
 DataDirOpt = Annotated[
     Path | None,
-    typer.Option("--data-dir", help="数据目录（默认 ~/.moneytool 或 MONEYTOOL_DATA__DIR）"),
+    typer.Option("--data-dir", help="数据目录（默认项目目录下 data\\，或 MONEYTOOL_DATA__DIR）"),
 ]
 
 
@@ -80,9 +80,13 @@ def _root(
 @app.command()
 def init(data_dir: DataDirOpt = None) -> None:
     """建数据目录、默认配置、参数版本与数据库结构。可重复执行。"""
-    from moneytool.app import init_data_dir  # noqa: PLC0415
+    from moneytool.app import LegacyDataBusyError, init_data_dir  # noqa: PLC0415
 
-    settings = init_data_dir(data_dir)
+    try:
+        settings = init_data_dir(data_dir)
+    except LegacyDataBusyError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
     typer.echo(f"数据目录: {settings.data_dir}")
     typer.echo(f"配置文件: {settings.config_path}")
     typer.echo(f"数据库:   {settings.db_path}")

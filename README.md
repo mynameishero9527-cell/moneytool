@@ -12,7 +12,7 @@ A 股板块资金周期分析工具：本地单进程（Python + DuckDB + FastAP
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-python -m moneytool init          # 建 ~/.moneytool：配置、参数版本、数据库
+python -m moneytool init          # 建项目目录下 data/：配置、参数版本、数据库
 python -m moneytool run           # 调度 + 回补 + Web，默认 http://127.0.0.1:8000
 ```
 
@@ -25,13 +25,13 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1       # 提示禁止运行脚本时先执行：Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 pip install -e ".[dev]"
 
-python -m moneytool init           # 数据目录为 C:\Users\<用户名>\.moneytool
+python -m moneytool init           # 数据目录为项目目录下 data\
 python -m moneytool run
 ```
 
 Windows 没有 `make`，`make check` 对应的命令为 `ruff check . ; ruff format --check . ; mypy moneytool ; pytest -q -m "not network"`，重新构建前端用 `python scripts/build_frontend.py`。
 
-数据目录可用 `--data-dir` 或环境变量 `MONEYTOOL_DATA__DIR` 覆盖。首次运行会先同步证券列表、交易日历与申万 / 中证成分，再在后台回补 5 年日线与日频资金流，进度见「数据状态」页。个股资金流为防限流每只间隔 5 秒逐只拉取，全市场约需半天，可让程序整夜运行；回补期间页面暂无结果。回补完成后自动补算最近 60 个交易日（`[schedule] catchup_days`），之后每个交易日收盘后自动更新。
+数据目录默认在项目目录下 `data/`（配置、数据库、日志、原始缓存、备份都在这里，已在 `.gitignore` 中），可用 `--data-dir` 或环境变量 `MONEYTOOL_DATA__DIR` 改到别处。旧版默认目录 `~/.moneytool` 里有数据且新目录还没有数据库时，`init` / `run` 会把它整体搬过来并删除旧目录；旧程序仍在运行时会提示先关闭。首次运行会先同步证券列表、交易日历与申万 / 中证成分，再在后台回补 5 年日线与日频资金流，进度见「数据状态」页。个股资金流为防限流每只间隔 5 秒逐只拉取，全市场约需半天，可让程序整夜运行；回补期间页面暂无结果。回补完成后自动补算最近 60 个交易日（`[schedule] catchup_days`），之后每个交易日收盘后自动更新。
 
 常用命令：
 
@@ -63,7 +63,7 @@ Windows 没有 `make`，`make check` 对应的命令为 `ruff check . ; ruff for
 
 交易日按时间表采集分段资金流并重算；收盘确认后生成收盘简报（数据目录 `briefs/`）并推送提醒，08:30 生成盘前简报；夜间补算到期标签的事后统计、清理过期原始缓存与盘中中间结果、轮换数据库备份。
 
-相关配置（`~/.moneytool/config.toml`）：
+相关配置（`data/config.toml`）：
 
 ```toml
 [data]

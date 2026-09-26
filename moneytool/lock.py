@@ -1,4 +1,4 @@
-"""写库任务互斥：文件锁 `~/.moneytool/.lock`。架构 4.1.3。"""
+"""写库任务互斥：文件锁 `<数据目录>/.lock`。架构 4.1.3。"""
 
 from __future__ import annotations
 
