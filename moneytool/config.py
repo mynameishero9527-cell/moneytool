@@ -64,11 +64,18 @@ class ScheduleConfig(BaseModel):
     catchup_min_coverage: float = 0.8  # 当日日线覆盖在市证券比例不足则不补算，避免用残缺数据出结论
 
 
+class NetworkConfig(BaseModel):
+    # direct：数据源直连，不走系统 / 环境代理（数据源都在境内，代理常导致 ProxyError）
+    # system：沿用系统代理；也可直接填代理地址，如 "http://127.0.0.1:7890"
+    proxy: str = "direct"
+
+
 class Settings(BaseSettings):
     """全部配置。TOML 文件缺失时用默认值；环境变量优先级高于文件。"""
 
     model_config = SettingsConfigDict(env_prefix="MONEYTOOL_", env_nested_delimiter="__")
 
+    network: NetworkConfig = NetworkConfig()
     server: ServerConfig = ServerConfig()
     data: DataConfig = DataConfig()
     rate_limit: RateLimitConfig = RateLimitConfig()
@@ -145,6 +152,10 @@ DEFAULT_CONFIG_TOML = """# moneytool 配置。改完重启程序生效。
 listen = "127.0.0.1"
 port = 8000
 open_browser = true
+
+[network]
+# direct：数据源直连，不走系统代理（默认）；system：沿用系统代理；或填代理地址如 "http://127.0.0.1:7890"
+proxy = "direct"
 
 [data]
 backfill_years_flow = 2

@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from moneytool.adapters.registry import Adapters, build_adapters
 from moneytool.config import DEFAULT_CONFIG_TOML, Settings, load_settings
 from moneytool.logging import get_logger, setup_logging
+from moneytool.network import apply_network
 from moneytool.params import Params, install_builtin_params, latest_params, params_for_date
 from moneytool.storage.conn import Database
 from moneytool.storage.migrate import migrate
@@ -66,6 +67,7 @@ def init_data_dir(data_dir: Path | None) -> Settings:
 def build_context(data_dir: Path | None, *, log_to_file: bool = True) -> AppContext:
     settings = load_settings(data_dir)
     settings.ensure_dirs()
+    apply_network(settings)
     setup_logging(
         settings.logs_dir if log_to_file else None, retention_days=settings.data.log_retention_days
     )

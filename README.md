@@ -31,7 +31,7 @@ python -m moneytool run
 
 Windows 没有 `make`，`make check` 对应的命令为 `ruff check . ; ruff format --check . ; mypy moneytool ; pytest -q -m "not network"`，重新构建前端用 `python scripts/build_frontend.py`。
 
-数据目录可用 `--data-dir` 或环境变量 `MONEYTOOL_DATA__DIR` 覆盖。首次运行会先同步证券列表、交易日历与板块成分，再在后台回补 5 年日线与日频资金流，进度见「数据状态」页。个股资金流为防限流每只间隔 5 秒逐只拉取，全市场约需半天，可让程序整夜运行；回补期间页面暂无结果。回补完成后自动补算最近 60 个交易日（`[schedule] catchup_days`），之后每个交易日收盘后自动更新。
+数据目录可用 `--data-dir` 或环境变量 `MONEYTOOL_DATA__DIR` 覆盖。首次运行会先同步证券列表、交易日历与申万 / 中证成分，再在后台回补 5 年日线与日频资金流，进度见「数据状态」页。个股资金流为防限流每只间隔 5 秒逐只拉取，全市场约需半天，可让程序整夜运行；回补期间页面暂无结果。回补完成后自动补算最近 60 个交易日（`[schedule] catchup_days`），之后每个交易日收盘后自动更新。
 
 常用命令：
 
@@ -74,7 +74,12 @@ backup_keep = 5                # 数据库备份保留份数
 webhook_url = ""               # 留空则只写日志；免打扰时段内的提醒并入次日盘前简报一起推送
 quiet_start = "20:30"
 quiet_end = "08:30"
+
+[network]
+proxy = "direct"               # direct：数据源直连，忽略 VPN / 代理软件设置的系统代理；system：沿用系统代理；或填代理地址如 "http://127.0.0.1:7890"
 ```
+
+东方财富连续 3 只个股失败（多为代理拦截或限流）时，资金流回补暂停 30 分钟再试，日线回补不受影响；`doctor.bat` 的「数据源连通」一节会指出被代理拦截的数据源。
 
 ## 开发
 
