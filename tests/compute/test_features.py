@@ -63,3 +63,39 @@ def test_limit_up_and_consecutive(params: Params) -> None:
     assert df["is_limit_up"].to_list() == [True, True, True, False]
     assert df["limit_streak"].to_list() == [1, 2, 3, 0]
     assert df["is_consecutive_limit"].to_list() == [False, True, True, False]
+
+
+def test_percentile_rank_ends_at_extremes(params: Params) -> None:
+    """分位用精确秩：窗口内最大为 1，最小为 0。"""
+    dates = trading_dates(12)
+    up = compute_stock_features(
+        make_stock_frame(
+            "000001.SZ", dates, net_main=[1.0] * 12, pct_chg=[i / 100 for i in range(12)]
+        ),
+        params,
+    )
+    down = compute_stock_features(
+        make_stock_frame(
+            "000001.SZ", dates, net_main=[1.0] * 12, pct_chg=[i / 100 for i in range(11, -1, -1)]
+        ),
+        params,
+    )
+    assert up["pct_chg_pct_20d"][-1] == pytest.approx(1.0)
+    assert down["pct_chg_pct_20d"][-1] == pytest.approx(0.0)
+
+
+def test_vwap_weights_by_shares_not_amount(params: Params) -> None:
+    """成交均价按股数加权：同样成交额时，低价日的股数更多。"""
+    dates = trading_dates(12)
+    close = [10.0] * 11 + [20.0]
+    pct = [0.0] * 11 + [1.0]
+    df = compute_stock_features(
+        make_stock_frame(
+            "000001.SZ", dates, net_main=[1.0] * 12, pct_chg=pct, close=close, amount=1000.0
+        ),
+        params,
+    )
+    # 11 日各 100 股 × 10 元，末日 50 股 × 20 元
+    vwap = (11 * 100 * 10 + 50 * 20) / (11 * 100 + 50)
+    assert df["vwap_20d"][-1] == pytest.approx(vwap)
+    assert df["vwap_gap_20d"][-1] == pytest.approx(20 / vwap - 1)

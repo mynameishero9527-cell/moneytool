@@ -73,7 +73,7 @@ def load_stock_inputs(
         )
         SELECT b.code, b.trade_date,
                f.net_main, f.net_super, f.net_large, f.net_medium, f.net_small,
-               b.open, b.high, b.low, b.close, b.pre_close, b.amount, b.turnover, b.pct_chg,
+               b.open, b.high, b.low, b.close, b.pre_close, b.amount, b.volume, b.turnover, b.pct_chg,
                b.adj_factor, b.limit_up, b.float_mv, cal.cal_idx
         FROM bar_daily b
         JOIN cal USING (trade_date)
@@ -107,7 +107,7 @@ def load_intraday_today(
         SELECT snap.code, CAST(? AS DATE) AS trade_date,
                seg.net_main, seg.net_super, seg.net_large, seg.net_medium, seg.net_small,
                NULL::DOUBLE AS open, NULL::DOUBLE AS high, NULL::DOUBLE AS low, snap.close,
-               prev.prev_close AS pre_close, snap.amount,
+               prev.prev_close AS pre_close, snap.amount, NULL::DOUBLE AS volume,
                snap.amount / NULLIF(prev.float_mv / NULLIF(prev.prev_close, 0) * snap.close, 0) AS turnover,
                snap.pct_chg, prev.adj_factor,
                -- 今日涨停价 ≈ 昨收 × (昨日涨停价 / 前收)，沿用昨日的涨跌停幅度

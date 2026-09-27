@@ -57,9 +57,9 @@ def compute_market_daily(eligible: pl.DataFrame, p: Params) -> pl.DataFrame:
             if "is_consecutive_limit" in eligible.columns
             else pl.lit(0, dtype=pl.Int32),
             stock_count=pl.len().cast(pl.Int32),
-            amount_all=pl.col("amount").sum(),
-            net_main_all=pl.col("net_main").sum(),
-            net_small_all=pl.col("net_small").sum()
+            amount_all=q.sum_or_null(pl.col("amount")),
+            net_main_all=q.sum_or_null(pl.col("net_main")),
+            net_small_all=q.sum_or_null(pl.col("net_small"))
             if "net_small" in eligible.columns
             else pl.lit(None),
             small_positive_ratio=(pl.col("net_small") > 0).mean()

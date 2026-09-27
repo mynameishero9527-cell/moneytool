@@ -47,7 +47,7 @@ def _role_inputs(df: pl.DataFrame, p: Params) -> pl.DataFrame:
     ex = p.exclude
     df = df.with_columns(
         turnover_sum_20d=q.rolling_sum("turnover", w.cycle, r).over(over),
-        _amt_close=pl.col("amount") * pl.col("close_adj"),
+        _px_vol=pl.col("_shares") * pl.col("close_adj"),
         _low_turn_big=(
             (pl.col("turnover") < ex.control_low_turnover)
             & (pl.col("pct_chg").abs() >= ex.control_big_move)
@@ -64,7 +64,7 @@ def _role_inputs(df: pl.DataFrame, p: Params) -> pl.DataFrame:
     )
     df = df.with_columns(
         vwap_20d=q.safe_div(
-            q.rolling_sum("_amt_close", w.cycle, r), q.rolling_sum("amount", w.cycle, r)
+            q.rolling_sum("_px_vol", w.cycle, r), q.rolling_sum("_shares", w.cycle, r)
         ).over(over),
         low_turn_big_move_60d=q.rolling_sum("_low_turn_big", w.long, r).over(over),
         new_low_60d_10d=pl.col("_new_low_60").fill_null(0).rolling_sum(10).over(over),
@@ -108,10 +108,18 @@ def compute_stock_features(df: pl.DataFrame, p: Params) -> pl.DataFrame:
     w = p.windows
     r = w.min_valid_ratio
     df = df.sort("code", "trade_date")
+    if "volume" not in df.columns:
+        df = df.with_columns(volume=pl.lit(None, dtype=pl.Float64))
 
     # 复权价：adj_factor 缺失时视为 1（不复权），只用于区间与位置指标。
+    # 成交股数优先用成交量；没有成交量时用成交额 / 收盘价，供成交均价按股数加权。
     df = df.with_columns(
         adj=pl.col("adj_factor").fill_null(1.0),
+        _shares=pl.when(pl.col("volume") > 0)
+        .then(pl.col("volume"))
+        .when(pl.col("close") > 0)
+        .then(pl.col("amount") / pl.col("close"))
+        .otherwise(None),
     ).with_columns(
         close_adj=pl.col("close") * pl.col("adj"),
         high_adj=pl.col("high") * pl.col("adj"),
@@ -233,6 +241,6 @@ def compute_stock_features(df: pl.DataFrame, p: Params) -> pl.DataFrame:
 
     return df.drop(
         [c for c in df.columns if c.startswith("_")]
-        + ["adj", "prev_close_adj", "super_share_mean_5d"]
+        + ["adj", "prev_close_adj", "super_share_mean_5d", "volume"]
         + (["cal_idx"] if "cal_idx" in df.columns else [])
     )

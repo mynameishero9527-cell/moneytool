@@ -38,33 +38,17 @@ def ols_slope(col: str, window: int, ratio: float) -> pl.Expr:
     return pl.sum_horizontal(terms, ignore_nulls=False) / denom
 
 
-def rolling_pct_rank(col: str, window: int, ratio: float, grid: int = 20) -> pl.Expr:
-    """当日值在自身近 N 日中的分位（0–1），用 `grid` 个滚动分位数近似：分位 = 超过的网格分位数个数 / grid。
+def rolling_pct_rank(col: str, window: int, ratio: float) -> pl.Expr:
+    """当日值在自身近 N 日非空样本中的分位（0–1）：(秩 − 1) / (个数 − 1)。
 
-    精确 rolling rank 在 Polars 里没有向量化实现；`grid=20` 时误差 ≤ 0.05，够判「极端 ≥ 0.9」与 0–20 分映射。
+    最小为 0、最大为 1。样本不足 `ratio` 或只剩 1 个值时为 null。
     """
     ms = min_samples(window, ratio)
-    exceeded = [
-        (
-            pl.col(col)
-            >= pl.col(col).rolling_quantile(
-                q, window_size=window, min_samples=ms, interpolation="linear"
-            )
-        )
-        .cast(pl.Int32)
-        .fill_null(0)
-        for q in (k / grid for k in range(1, grid + 1))
-    ]
-    total = exceeded[0]
-    for e in exceeded[1:]:
-        total = total + e
-    valid_count = (
-        pl.col(col).is_not_null().cast(pl.Int32).rolling_sum(window_size=window, min_samples=1)
-    )
-    valid = valid_count >= ms
+    n = pl.col(col).is_not_null().cast(pl.Int32).rolling_sum(window_size=window, min_samples=1)
+    rank = pl.col(col).rolling_rank(window_size=window, method="average", min_samples=ms)
     return (
-        pl.when(valid & pl.col(col).is_not_null())
-        .then(total.cast(pl.Float64) / grid)
+        pl.when(pl.col(col).is_not_null() & (n >= ms) & (n > 1))
+        .then((rank - 1) / (n - 1))
         .otherwise(None)
     )
 
@@ -90,6 +74,11 @@ def add_streak(df: pl.DataFrame, col: str, key: str, out: str) -> pl.DataFrame:
         .cast(pl.Int32)
         .alias(out)
     ).drop("_sign", "_run", "_len")
+
+
+def sum_or_null(expr: pl.Expr) -> pl.Expr:
+    """分组求和：至少有一个非空值才相加。`group_by` 里全为 null 的 sum 会变成 0。"""
+    return pl.when(expr.is_not_null().any()).then(expr.sum()).otherwise(None)
 
 
 def safe_div(num: pl.Expr, den: pl.Expr) -> pl.Expr:

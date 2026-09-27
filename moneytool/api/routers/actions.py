@@ -102,14 +102,16 @@ def tracking(
         ),
         eqw AS (
             SELECT t.list_type, t.code, t.sector_id, t.entered_date,
-                   exp(sum(ln(1 + m.eqw_ret))) - 1 AS eqw_since
+                   CASE WHEN min(m.eqw_ret) > -1 THEN exp(sum(ln(1 + m.eqw_ret))) - 1 END AS eqw_since
             FROM t JOIN market_daily m ON m.segment = 'close' AND m.param_version = t.param_version
                  AND m.trade_date > t.entered_date AND m.trade_date <= coalesce(t.exited_date, ?)
             GROUP BY ALL
         ),
         sec_ret AS (
             SELECT t.list_type, t.code, t.sector_id, t.entered_date,
-                   exp(sum(ln(1 + TRY_CAST(json_extract(f.features, '$.sector_pct_chg') AS DOUBLE)))) - 1 AS sector_since
+                   CASE WHEN min(TRY_CAST(json_extract(f.features, '$.sector_pct_chg') AS DOUBLE)) > -1
+                        THEN exp(sum(ln(1 + TRY_CAST(json_extract(f.features, '$.sector_pct_chg') AS DOUBLE)))) - 1
+                   END AS sector_since
             FROM t JOIN feature_daily f ON f.subject_type = 'sector' AND f.subject_id = t.sector_id
                  AND f.segment = 'close' AND f.param_version = t.param_version
                  AND f.trade_date > t.entered_date AND f.trade_date <= coalesce(t.exited_date, ?)

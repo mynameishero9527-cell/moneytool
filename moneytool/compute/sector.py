@@ -74,27 +74,22 @@ def aggregate_sector_daily(stock: pl.DataFrame, member: pl.DataFrame, p: Params)
         _top5=pl.when(pl.col("_rank_pos") <= 5).then(pl.col("_pos")).otherwise(0.0),
     )
 
+    def _ex_one(col: str) -> pl.Expr:
+        """一字板净额记 0（已知剔除）；其余保留 null，避免整组缺失被收成 0。"""
+        return pl.when(pl.col("is_one_word")).then(0.0).otherwise(pl.col(col))
+
     agg = kept.group_by(["sector_id", "trade_date"]).agg(
-        sector_net_main=pl.col("_flow").sum(),
-        sector_net_super=pl.when(pl.col("is_one_word"))
-        .then(0.0)
-        .otherwise(pl.col("net_super"))
-        .sum(),
-        sector_net_large=pl.when(pl.col("is_one_word"))
-        .then(0.0)
-        .otherwise(pl.col("net_large"))
-        .sum(),
-        sector_net_medium=pl.when(pl.col("is_one_word"))
-        .then(0.0)
-        .otherwise(pl.col("net_medium"))
-        .sum(),
-        sector_net_small=pl.when(pl.col("is_one_word"))
-        .then(0.0)
-        .otherwise(pl.col("net_small"))
-        .sum(),
-        sector_amount=pl.col("amount").sum(),
+        sector_net_main=q.sum_or_null(pl.col("_flow")),
+        sector_net_super=q.sum_or_null(_ex_one("net_super")),
+        sector_net_large=q.sum_or_null(_ex_one("net_large")),
+        sector_net_medium=q.sum_or_null(_ex_one("net_medium")),
+        sector_net_small=q.sum_or_null(_ex_one("net_small")),
+        sector_amount=q.sum_or_null(pl.col("amount")),
         member_count=pl.col("code").n_unique(),
-        up_count=(pl.col("pct_chg") > 0).sum(),
+        up_count=pl.when(pl.col("pct_chg").is_not_null().any())
+        .then((pl.col("pct_chg") > 0).fill_null(False).sum())
+        .otherwise(None),
+        breadth=(pl.col("pct_chg") > 0).mean(),
         limit_up_count=pl.col("is_limit_up").sum(),
         consecutive_limit_count=pl.col("is_consecutive_limit").sum()
         if "is_consecutive_limit" in kept.columns
@@ -112,9 +107,6 @@ def aggregate_sector_daily(stock: pl.DataFrame, member: pl.DataFrame, p: Params)
     )
     return agg.with_columns(
         sector_main_ratio=q.safe_div(pl.col("sector_net_main"), pl.col("sector_amount")),
-        breadth=q.safe_div(
-            pl.col("up_count").cast(pl.Float64), pl.col("member_count").cast(pl.Float64)
-        ),
         limit_up_ratio=q.safe_div(
             pl.col("limit_up_count").cast(pl.Float64), pl.col("member_count").cast(pl.Float64)
         ),

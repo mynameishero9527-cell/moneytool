@@ -91,10 +91,13 @@ def compute_labels(conn: duckdb.DuckDBPyConnection, day: dt.date, p: Params) -> 
                       WHERE b.code = e.code AND b.trade_date = e.end_date) AS p1,
                     (SELECT min(close * coalesce(adj_factor, 1)) FROM bar_daily b
                       WHERE b.code = e.code AND b.trade_date > e.entered_date AND b.trade_date <= e.end_date) AS pmin,
-                    (SELECT exp(sum(ln(1 + eqw_ret))) - 1 FROM market_daily m
+                    (SELECT CASE WHEN min(eqw_ret) > -1 THEN exp(sum(ln(1 + eqw_ret))) - 1 END
+                       FROM market_daily m
                       WHERE m.segment = 'close' AND m.param_version = $v
                         AND m.trade_date > e.entered_date AND m.trade_date <= e.end_date) AS eqw_ret,
-                    (SELECT exp(sum(ln(1 + TRY_CAST(json_extract(f.features, '$.sector_pct_chg') AS DOUBLE)))) - 1
+                    (SELECT CASE WHEN min(TRY_CAST(json_extract(f.features, '$.sector_pct_chg') AS DOUBLE)) > -1
+                                 THEN exp(sum(ln(1 + TRY_CAST(json_extract(f.features, '$.sector_pct_chg') AS DOUBLE)))) - 1
+                            END
                        FROM feature_daily f
                       WHERE f.subject_type = 'sector' AND f.subject_id = e.sector_id AND f.segment = 'close'
                         AND f.param_version = $v AND f.trade_date > e.entered_date
