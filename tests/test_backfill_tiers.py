@@ -15,13 +15,15 @@ from moneytool.ingest.bars import (
     ADJ_FROM,
     bars_tiers,
     mark_progress,
+    note_provisional_day,
+    provisional_dates,
     reset_tier_failures,
     tier_counts,
 )
 from moneytool.ingest.flow import restated_dates
 from moneytool.scheduler.jobs import TIER_DONE_KEY, JobRunner
 from moneytool.scheduler.progress import sync_overview
-from moneytool.storage.repo import setting_get
+from moneytool.storage.repo import setting_get, upsert
 
 DAY = dt.date(2026, 9, 25)
 
@@ -172,6 +174,50 @@ def test_ready_needs_first_tier_and_flow_first_pass(tmp_data_dir: Path) -> None:
         mark_progress(conn, "flow_daily", "000001.SZ", "failed")
     with ctx.db.read() as conn:
         assert runner.history_ready(conn, DAY)
+    ctx.close()
+
+
+def test_provisional_bars_are_replaced_before_older_tiers(tmp_data_dir: Path) -> None:
+    ctx, runner, fake = _setup(tmp_data_dir, {"000001.SZ": dt.date(2000, 1, 1)})
+    with ctx.db.write() as conn:
+        upsert(
+            conn,
+            "bar_daily",
+            pl.DataFrame(
+                {
+                    "code": ["000001.SZ"],
+                    "trade_date": [DAY],
+                    "open": pl.Series([None], dtype=pl.Float64),
+                    "high": pl.Series([None], dtype=pl.Float64),
+                    "low": pl.Series([None], dtype=pl.Float64),
+                    "close": [9.0],
+                    "pre_close": [9.0],
+                    "volume": pl.Series([None], dtype=pl.Float64),
+                    "amount": [1.0e7],
+                    "turnover": pl.Series([None], dtype=pl.Float64),
+                    "pct_chg": [0.01],
+                    "adj_factor": [2.0],
+                    "limit_up": [9.9],
+                    "limit_down": [8.1],
+                    "float_mv": [5.0],
+                    "is_suspended": [False],
+                }
+            ),
+        )
+        note_provisional_day(conn, DAY)
+    assert runner._backfill_bars_batch(DAY, 10) == 1
+    assert [c for c in fake.calls if c[0] == "k"] == [("k", "000001.SZ", DAY, DAY)]
+    assert [c for c in fake.calls if c[0] == "adj"] == []
+    with ctx.db.read() as conn:
+        row = conn.execute(
+            "SELECT open, adj_factor, float_mv FROM bar_daily WHERE code = '000001.SZ'"
+        ).fetchone()
+        assert row == (10.0, 2.0, 5.0)
+        assert provisional_dates(conn) == []
+        assert restated_dates(conn) == [DAY]
+    fake.calls.clear()
+    assert runner._backfill_bars_batch(DAY, 10) == 1
+    assert fake.calls[0][2] < DAY
     ctx.close()
 
 

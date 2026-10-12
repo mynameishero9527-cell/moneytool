@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -13,7 +14,7 @@ import polars as pl
 from moneytool.adapters.base import AdapterError, SourceBlockedError
 from moneytool.adapters.registry import Adapters
 from moneytool.logging import get_logger
-from moneytool.storage.repo import record_quality, upsert
+from moneytool.storage.repo import record_quality, setting_get, setting_set, upsert
 from moneytool.types import QualityStatus
 
 log = get_logger(__name__)
@@ -425,7 +426,15 @@ def daily_bars_from_snapshot(
         up.alias("limit_up"),
         down.alias("limit_down"),
         "float_mv",
-        (pl.col("amount").fill_null(0.0) == 0).alias("is_suspended"),
+        # 成交额缺失但已有涨跌幅：资金流快照反推不出成交额，不是停牌。
+        # 标成停牌会在装载日线时被整行丢掉。
+        (
+            pl.when(pl.col("amount").is_not_null())
+            .then(pl.col("amount") == 0)
+            .when(pl.col("pct_chg").is_not_null() | pl.col("close").is_not_null())
+            .then(False)
+            .otherwise(True)
+        ).alias("is_suspended"),
     )
 
 
@@ -448,3 +457,145 @@ def restated_codes(snapshot: pl.DataFrame, prev: pl.DataFrame, tol: float = 0.00
         .unique()
         .to_list()
     )
+
+
+PROVISIONAL_KEY = "bars_provisional_days"
+
+
+def _provisional_state(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+    raw = setting_get(conn, PROVISIONAL_KEY)
+    if not raw:
+        return {"dates": [], "tried": {}}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"dates": [], "tried": {}}
+    if not isinstance(data, dict):
+        return {"dates": [], "tried": {}}
+    dates = data.get("dates")
+    tried = data.get("tried")
+    return {
+        "dates": [str(x) for x in dates] if isinstance(dates, list) else [],
+        "tried": tried if isinstance(tried, dict) else {},
+    }
+
+
+def _save_provisional(conn: duckdb.DuckDBPyConnection, state: dict[str, Any]) -> None:
+    setting_set(conn, PROVISIONAL_KEY, json.dumps(state, ensure_ascii=False))
+
+
+def flag_openless_days(conn: duckdb.DuckDBPyConnection, since: dt.date) -> int:
+    """把近期「有涨跌幅但没有开盘价」的交易日标成待覆盖。用于进程启动时补上升级前留下的近似日线。"""
+    rows = conn.execute(
+        "SELECT DISTINCT trade_date FROM bar_daily "
+        "WHERE open IS NULL AND pct_chg IS NOT NULL AND trade_date >= ?",
+        [since],
+    ).fetchall()
+    for (day,) in rows:
+        note_provisional_day(conn, day)
+    return len(rows)
+
+
+def note_provisional_day(conn: duckdb.DuckDBPyConnection, day: dt.date) -> None:
+    """记下用资金流快照近似的交易日，等 Baostock 日线分批覆盖。"""
+    state = _provisional_state(conn)
+    iso = day.isoformat()
+    if iso not in state["dates"]:
+        state["dates"].append(iso)
+        state["dates"].sort()
+    state["tried"].setdefault(iso, [])
+    _save_provisional(conn, state)
+
+
+def clear_provisional_day(conn: duckdb.DuckDBPyConnection, day: dt.date) -> None:
+    state = _provisional_state(conn)
+    iso = day.isoformat()
+    state["dates"] = [d for d in state["dates"] if d != iso]
+    state["tried"].pop(iso, None)
+    _save_provisional(conn, state)
+
+
+def provisional_dates(conn: duckdb.DuckDBPyConnection) -> list[dt.date]:
+    return [dt.date.fromisoformat(x) for x in _provisional_state(conn)["dates"]]
+
+
+def _untried_provisional_codes(conn: duckdb.DuckDBPyConnection, day: dt.date) -> list[str]:
+    """开盘价仍空、且还没尝试过用日线覆盖的代码。有涨跌幅的不算停牌。"""
+    state = _provisional_state(conn)
+    tried = {str(c) for c in state["tried"].get(day.isoformat(), [])}
+    rows = conn.execute(
+        "SELECT code FROM bar_daily WHERE trade_date = ? AND open IS NULL "
+        "AND (NOT is_suspended OR pct_chg IS NOT NULL) ORDER BY code",
+        [day],
+    ).fetchall()
+    return [str(r[0]) for r in rows if str(r[0]) not in tried]
+
+
+def provisional_batch(
+    conn: duckdb.DuckDBPyConnection, limit: int
+) -> tuple[dt.date, list[str]] | None:
+    """最早一个待覆盖交易日，以及本批要拉的代码。没有则返回 None。"""
+    for day in provisional_dates(conn):
+        todo = _untried_provisional_codes(conn, day)[:limit]
+        if todo:
+            return day, todo
+    return None
+
+
+def mark_provisional_tried(conn: duckdb.DuckDBPyConnection, day: dt.date, codes: list[str]) -> bool:
+    """记下已尝试的代码。该日没有剩余目标时清掉标记，返回是否已清掉。"""
+    state = _provisional_state(conn)
+    iso = day.isoformat()
+    tried = [str(c) for c in state["tried"].get(iso, [])]
+    tried.extend(codes)
+    state["tried"][iso] = tried
+    if iso not in state["dates"]:
+        state["dates"].append(iso)
+        state["dates"].sort()
+    _save_provisional(conn, state)
+    if _untried_provisional_codes(conn, day):
+        return False
+    clear_provisional_day(conn, day)
+    return True
+
+
+def overlay_official_bars(conn: duckdb.DuckDBPyConnection, frames: list[pl.DataFrame]) -> int:
+    """用 Baostock 日线覆盖近似行的开高低收与成交，保留已有复权因子和流通市值。"""
+    frames = [f for f in frames if not f.is_empty()]
+    if not frames:
+        return 0
+    k = pl.concat(frames, how="vertical_relaxed")
+    conn.register("_keys", k.select("code", "trade_date"))
+    try:
+        prev = conn.execute(
+            "SELECT b.code, b.trade_date, b.adj_factor, b.float_mv FROM bar_daily b "
+            "JOIN _keys k USING (code, trade_date)"
+        ).pl()
+    finally:
+        conn.unregister("_keys")
+    if prev.is_empty():
+        return 0
+    up, down = _limit_prices(pl.col("pre_close"), pl.col("code"), pl.col("is_st"))
+    out = (
+        k.join(prev, on=["code", "trade_date"], how="inner")
+        .with_columns(limit_up=up, limit_down=down)
+        .select(
+            "code",
+            "trade_date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "pre_close",
+            "volume",
+            "amount",
+            "turnover",
+            "pct_chg",
+            "adj_factor",
+            "limit_up",
+            "limit_down",
+            "float_mv",
+            "is_suspended",
+        )
+    )
+    return upsert(conn, "bar_daily", out)

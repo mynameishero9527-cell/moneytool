@@ -53,11 +53,18 @@ def build_scheduler(runner: JobRunner) -> BackgroundScheduler:
             id=f"segment_{seg.value}",
             misfire_grace_time=300,
         )
-    # 15:30 起每 30 分钟探测到 20:00
+    # 15:30 起每 30 分钟探测到 19:30。不含 15:00：集合竞价刚结束，
+    # 创业板 / 科创板盘后固定价格成交要到 15:30 才计入当日成交额。
     sch.add_job(
         runner.job_close_confirm,
-        CronTrigger(day_of_week=weekdays, hour="15-19", minute="0,30", timezone=TZ),
+        CronTrigger(day_of_week=weekdays, hour=15, minute=30, timezone=TZ),
         id="close_confirm",
+        misfire_grace_time=6 * 3600,
+    )
+    sch.add_job(
+        runner.job_close_confirm,
+        CronTrigger(day_of_week=weekdays, hour="16-19", minute="0,30", timezone=TZ),
+        id="close_confirm_later",
         misfire_grace_time=6 * 3600,
     )
     sch.add_job(

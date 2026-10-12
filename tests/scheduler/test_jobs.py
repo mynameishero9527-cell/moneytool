@@ -8,7 +8,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from moneytool.app import AppContext, build_context, init_data_dir
+from moneytool.app import TZ, AppContext, build_context, init_data_dir
 from moneytool.lock import LockBusyError, write_lock
 from moneytool.scheduler.jobs import JobRunner, reference_stale
 from moneytool.scheduler.schedule import build_scheduler
@@ -98,6 +98,20 @@ def test_run_store_waits_instead_of_dropping(
     assert len(attempts) == 3
 
 
+def test_close_confirm_skips_before_1530(ctx: AppContext, monkeypatch: pytest.MonkeyPatch) -> None:
+    fixed = dt.datetime(2026, 9, 25, 15, 0, tzinfo=TZ)
+    monkeypatch.setattr("moneytool.scheduler.jobs.now_sh", lambda: fixed)
+    monkeypatch.setattr("moneytool.scheduler.jobs.today_sh", lambda: fixed.date())
+    runner = JobRunner(ctx)
+
+    def _no_fetch(day: dt.date) -> tuple[None, None]:
+        raise AssertionError(day)
+
+    runner._fetch_spot = _no_fetch  # type: ignore[method-assign]
+    assert runner.job_close_confirm() is None
+    assert runner.job_close_confirm(force=True) is None
+
+
 def test_schedule_has_all_slots(ctx: AppContext) -> None:
     sch = build_scheduler(JobRunner(ctx))
     ids = {j.id for j in sch.get_jobs()}
@@ -111,6 +125,7 @@ def test_schedule_has_all_slots(ctx: AppContext) -> None:
         "segment_1400_1430",
         "segment_1430_1500",
         "close_confirm",
+        "close_confirm_later",
         "close_confirm_deadline",
         "nightly",
     }

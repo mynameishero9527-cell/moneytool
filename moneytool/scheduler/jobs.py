@@ -22,9 +22,16 @@ from moneytool.ingest.bars import (
     Tier,
     backfill_bars,
     bars_tiers,
+    clear_provisional_day,
     daily_bars_from_snapshot,
     fetch_bars,
+    flag_openless_days,
+    mark_provisional_tried,
+    note_provisional_day,
+    overlay_official_bars,
     pending_adjust,
+    provisional_batch,
+    provisional_dates,
     reset_tier_failures,
     restated_codes,
     store_adjust,
@@ -89,6 +96,10 @@ TIER_DONE_KEY = "bars_tier_done"
 STORE_WAIT_SECONDS = 1800
 MISSING_BARS_LIMIT = 200  # 当日日线由快照生成后，逐只补的上限（除权股票与快照缺漏）
 CONCEPT_REFRESH_DAYS = 7  # 概念成分变动不频繁，每周重拉一次，不必每个交易日逐板块请求
+
+
+def _spot_usable(spot: pl.DataFrame | None) -> bool:
+    return spot is not None and not spot.is_empty() and "open" in spot.columns
 
 
 class JobRunner:
@@ -218,6 +229,8 @@ class JobRunner:
             self.progress.set_stage("reference")
             self.job_reference_sync(day)
         self.run_job("backfill_tier_retry", reset_tier_failures)
+        since = day - dt.timedelta(days=40)
+        self.run_job("bars_provisional_scan", lambda conn: flag_openless_days(conn, since))
         self.job_catchup()
         self.progress.set_stage("backfill")
 
@@ -373,7 +386,7 @@ class JobRunner:
         with self.ctx.db.read() as conn:
             if not is_trading_day(conn, day):
                 return None
-        flow = self._fetch_flow_rank(day, segment)
+        _source, flow = self._fetch_flow_rank(day, segment)
 
         def work(conn: duckdb.DuckDBPyConnection) -> PipelineResult | None:
             counts = capture_segment(conn, ad, day, segment, now_sh(), stock=flow)
@@ -391,6 +404,9 @@ class JobRunner:
     # ---- 收盘确认（15:30 起探测） ----
 
     def job_close_confirm(self, force: bool = False) -> PipelineResult | None:
+        # 定时表达式若含 15:00 会提前触发。此时集合竞价刚结束，盘后固定价格成交尚未计入。
+        if not force and now_sh().time() < dt.time(15, 30):
+            return None
         day = today_sh()
         ad = self.ctx.adapters
         with self.ctx.db.read() as conn:
@@ -400,7 +416,10 @@ class JobRunner:
                 return None
         # 全 A 快照与今日资金流都在写锁外拉：新浪要翻页，不能占着锁挡住回补落库
         spot, spot_error = self._fetch_spot(day)
-        flow = self._fetch_flow_rank(day, CLOSE_SEGMENT)
+        flow_source, flow = self._fetch_flow_rank(day, CLOSE_SEGMENT)
+        # 快照不可用时只探 1 只，用来发现 Baostock 封禁；不在收盘任务里逐只拉全市场
+        if not _spot_usable(spot):
+            self._probe_day_bars(day)
 
         def work(conn: duckdb.DuckDBPyConnection) -> PipelineResult | None:
             if spot_error is not None:
@@ -412,9 +431,10 @@ class JobRunner:
                     status=QualityStatus.MISSING,
                     reason=str(spot_error)[:300],
                 )
-            # 1) 当日日线由全 A 快照生成（一次请求全市场），除权与快照缺漏的少数股票再走 Baostock；
-            #    两家快照都不可用时才退回逐只拉
-            bars_ready = self._daily_bars(conn, day, spot) or self._bars_ready(conn, day)
+            # 1) 当日日线由全 A 快照生成（一次请求全市场），除权与快照缺漏的少数股票再走 Baostock
+            bars_ready = self._daily_bars(conn, day, spot) if _spot_usable(spot) else False
+            if bars_ready:
+                clear_provisional_day(conn, day)
             if not bars_ready:
                 deadline = now_sh().time() >= dt.time.fromisoformat(
                     self.ctx.settings.schedule.confirm_deadline
@@ -423,15 +443,15 @@ class JobRunner:
                     return None
             # 2) 当日正式资金流 = 收盘后最后一次「今日」累计
             n = confirm_from_snapshot(conn, ad, day, now_sh(), stock=flow)
-            if n == 0:
+            if n == 0 and not isinstance(flow, AdapterError):
                 record_quality(
                     conn,
-                    source="eastmoney",
+                    source=flow_source or "realtime",
                     endpoint="flow_rank_stock",
                     trade_date=day,
                     segment=CLOSE_SEGMENT,
                     status=QualityStatus.MISSING,
-                    reason="收盘累计拉取失败",
+                    reason="收盘累计为空",
                 )
             if not bars_ready:
                 self._bars_from_snapshot(conn, day)
@@ -451,41 +471,49 @@ class JobRunner:
         return out if isinstance(out, PipelineResult) else None
 
     def _bars_ready(self, conn: duckdb.DuckDBPyConnection, day: dt.date) -> bool:
-        """探测 Baostock 当日日线是否到位（拉 1 只样本）；到位则全量拉当日。"""
+        """探测 Baostock 当日日线是否已发布（只拉 1 只）。封禁则暂停日线回补。
+
+        不在这里全市场逐只拉：那会占住写锁，也容易把 Baostock 打进黑名单。
+        缺的交易日由回补线程分批覆盖。
+        """
+        if self.bars_paused():
+            return False
         sample = conn.execute(
             "SELECT code FROM security WHERE NOT is_delisting ORDER BY code LIMIT 1"
         ).fetchone()
-        if sample is None or self.bars_paused():
+        if sample is None:
             return False
+        return self._kdata_published(str(sample[0]), day)
+
+    def _probe_day_bars(self, day: dt.date) -> bool:
+        """写锁外探测当日日线是否发布。读完样本代码就放开连接，再发网络请求。"""
+        if self.bars_paused():
+            return False
+        with self.ctx.db.read() as conn:
+            sample = conn.execute(
+                "SELECT code FROM security WHERE NOT is_delisting ORDER BY code LIMIT 1"
+            ).fetchone()
+        if sample is None:
+            return False
+        return self._kdata_published(str(sample[0]), day)
+
+    def _kdata_published(self, code: str, day: dt.date) -> bool:
         try:
-            k = self.ctx.adapters.baostock.kdata(sample[0], day, day, day)
+            k = self.ctx.adapters.baostock.kdata(code, day, day, day)
         except SourceBlockedError as exc:
             self._pause_bars(exc.reason)
             return False
         except AdapterError:
             return False
-        if k.is_empty():
-            return False
-        codes = [
-            r[0]
-            for r in conn.execute("SELECT code FROM security WHERE NOT is_delisting").fetchall()
-        ]
-        backfill_bars(
-            conn,
-            self.ctx.adapters,
-            start=day,
-            end=day,
-            day=day,
-            codes=codes,
-            should_stop=self.stop_event.is_set,
-        )
-        return True
+        return not k.is_empty()
 
-    def _fetch_flow_rank(self, day: dt.date, segment: str) -> pl.DataFrame | AdapterError:
+    def _fetch_flow_rank(
+        self, day: dt.date, segment: str
+    ) -> tuple[str | None, pl.DataFrame | AdapterError]:
         try:
-            return self.ctx.adapters.flow_rank_stock(day, segment)[1]
+            return self.ctx.adapters.flow_rank_stock(day, segment)
         except AdapterError as exc:
-            return exc
+            return None, exc
 
     def _fetch_spot(self, day: dt.date) -> tuple[pl.DataFrame | None, AdapterError | None]:
         try:
@@ -578,12 +606,16 @@ class JobRunner:
         return pl.DataFrame(rows, schema={"code": pl.Utf8, "_adj": pl.Float64}) if rows else None
 
     def _bars_from_snapshot(self, conn: duckdb.DuckDBPyConnection, day: dt.date) -> None:
-        """全 A 快照也拿不到：用资金流快照反推成交额，生成价格模式的当日日线。"""
+        """全 A 快照也拿不到：用资金流快照补还没有开盘价的股票。已有正式日线的不覆盖。"""
         snap = conn.execute(
             "SELECT s.subject_id AS code, sec.name, s.close, s.pct_chg, s.amount, "
             "NULL::DOUBLE AS turnover, NULL::DOUBLE AS float_mv "
             "FROM flow_snapshot s LEFT JOIN security sec ON sec.code = s.subject_id "
-            "WHERE s.trade_date = ? AND s.segment = ? AND s.subject_type = 'stock'",
+            "WHERE s.trade_date = ? AND s.segment = ? AND s.subject_type = 'stock' "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM bar_daily b WHERE b.code = s.subject_id AND b.trade_date = s.trade_date "
+            "  AND b.open IS NOT NULL"
+            ")",
             [day, CLOSE_SEGMENT],
         ).pl()
         if snap.is_empty():
@@ -592,13 +624,14 @@ class JobRunner:
             snap.with_columns(pl.col("name").fill_null("")), day, self._prev_bars(conn, day)
         )
         upsert(conn, "bar_daily", bars)
+        note_provisional_day(conn, day)
         record_quality(
             conn,
             source="baostock",
             endpoint="kdata",
             trade_date=day,
             status=QualityStatus.STALE,
-            reason="当日日线与全 A 快照都未到，暂用资金流快照近似（次日自检覆盖）",
+            reason="当日日线与全 A 快照都未到，暂用资金流快照近似；日线回补分批覆盖后重算",
         )
 
     # ---- 夜间 ----
@@ -701,9 +734,78 @@ class JobRunner:
         cfg = self.ctx.settings
         return bars_tiers(day, cfg.backfill.bars_tiers_days, cfg.data.backfill_years_bars)
 
+    def _repair_provisional_batch(self, day: dt.date, n: int) -> int | None:
+        """覆盖资金流快照近似的日线。没有待覆盖的日期时返回 None，调用方继续分层回补。"""
+        with self.ctx.db.read() as conn:
+            target = provisional_batch(conn, n)
+            pending = provisional_dates(conn)
+        if target is None:
+            if pending:
+
+                def drop(conn: duckdb.DuckDBPyConnection) -> int:
+                    days = provisional_dates(conn)
+                    for d in days:
+                        clear_provisional_day(conn, d)
+                    return len(days)
+
+                self.run_store("bars_provisional", drop)
+            return None
+        trade_day, codes = target
+        lane = self.progress.lanes["bars"]
+        lane.begin(len(codes))
+        try:
+            results = fetch_bars(
+                self.ctx.adapters,
+                codes,
+                start=trade_day,
+                end=trade_day,
+                day=day,
+                ranges={c: (trade_day, trade_day) for c in codes},
+                adj_codes=set(),
+                should_stop=self.stop_event.is_set,
+                on_item=lane.tick,
+            )
+        except Exception as exc:
+            log.error("backfill_fetch_failed", task="bars_provisional", error=str(exc))
+            lane.end()
+            return 0
+        blocked = next((r for _, r in results if isinstance(r, SourceBlockedError)), None)
+        if blocked is not None:
+            self._pause_bars(blocked.reason)
+
+        def store(conn: duckdb.DuckDBPyConnection) -> int:
+            frames: list[pl.DataFrame] = []
+            tried: list[str] = []
+            for code, res in results:
+                if isinstance(res, SourceBlockedError):
+                    continue
+                tried.append(code)
+                if isinstance(res, AdapterError):
+                    continue
+                k, _adj = res
+                if not k.is_empty():
+                    frames.append(k)
+            wrote = overlay_official_bars(conn, frames)
+            mark_provisional_tried(conn, trade_day, tried)
+            if wrote:
+                note_restated(conn, {trade_day})
+            return len(tried)
+
+        try:
+            out = self.run_store("bars_provisional", store)
+        finally:
+            lane.end()
+        return out if isinstance(out, int) else 0
+
     def _backfill_bars_batch(self, day: dt.date, n: int) -> int:
         """分层回补：先把所有股票补到近半年，再整体往前补到近一年，最后补满配置年数。
-        Baostock 单只耗时随区间长度增长（半年约 1.6 秒、5 年约 6.6 秒），这样第一层很快补完即可开始计算。"""
+        Baostock 单只耗时随区间长度增长（半年约 1.6 秒、5 年约 6.6 秒），这样第一层很快补完即可开始计算。
+        资金流快照近似的交易日优先覆盖，避免正式日线到了还留着空的开高低收。"""
+        if self.bars_paused():
+            return 0
+        repaired = self._repair_provisional_batch(day, n)
+        if repaired is not None:
+            return repaired
         tiers = self.bars_tiers(day)
         ranges: dict[str, tuple[dt.date, dt.date]] = {}
         with self.ctx.db.read() as conn:
